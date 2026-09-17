@@ -52,6 +52,26 @@ cp "$ORIGEN/app.py" "$PROYECTO/app.py"
 [ -f "$PROYECTO/best.pt" ] || { echo "FALTA best.pt en $PROYECTO"; exit 1; }
 mkdir -p "$PROYECTO/.ultralytics"
 
+# --- 4b. Segundo motor de OCR: PaddleOCR, en su propio venv ---------------
+# Va aparte a proposito: paddleocr exige numpy 2.3 y otro OpenCV, que romperian
+# el venv del servidor (numpy 2.5 + torch + easyocr). Es OPCIONAL -- si falla la
+# instalacion o se apaga el servicio, el servidor sigue con EasyOCR solo.
+# Aporta: 10 lecturas correctas de 13 en el banco, frente a 9 sin el.
+if [ "${CON_PADDLE:-1}" = "1" ]; then
+  echo "--- PaddleOCR (motor secundario) ---"
+  [ -d /home/ubuntu/exp-venv ] || python3 -m venv /home/ubuntu/exp-venv
+  /home/ubuntu/exp-venv/bin/pip install --upgrade pip -q
+  /home/ubuntu/exp-venv/bin/pip install --no-cache-dir -q paddlepaddle paddleocr fastapi "uvicorn[standard]" \
+    || echo "PaddleOCR no se pudo instalar; se sigue sin el"
+  cp "$ORIGEN/ocr_paddle.py" "$PROYECTO/ocr_paddle.py" 2>/dev/null || true
+  if [ -f "$ORIGEN/ocr-paddle.service" ] && [ -f "$PROYECTO/ocr_paddle.py" ]; then
+    sudo cp "$ORIGEN/ocr-paddle.service" /etc/systemd/system/ocr-paddle.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable ocr-paddle.service
+    sudo systemctl restart ocr-paddle.service
+  fi
+fi
+
 # --- 5. Servicio systemd ------------------------------------------------------
 # Libera el 8080 si lo tiene el servidor estatico del laboratorio anterior:
 # la demo no se pierde, FastAPI la vuelve a servir en /web/.

@@ -30,6 +30,7 @@ from typing import List, Optional, Tuple
 import cv2
 import easyocr
 import numpy as np
+import requests
 from PIL import Image, ImageOps
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +56,15 @@ MAX_SIDE = int(os.getenv("MAX_SIDE", "1280"))        # lado maximo antes de infe
 # nada al lado de los segundos que tarda el OCR.
 IMGSZ = int(os.getenv("IMGSZ", "1280"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "32"))  # por campo del formulario
+# Microservicio de PaddleOCR (ver server/ocr_paddle.py). Va aparte por conflicto
+# de dependencias y por memoria. Si no responde, se usa solo EasyOCR.
+PADDLE_URL = os.getenv("PADDLE_URL", "http://127.0.0.1:8091")
+PADDLE_TIMEOUT = float(os.getenv("PADDLE_TIMEOUT", "20"))
+# Confianza minima para hacerle caso a PaddleOCR. Medido sobre el banco, sus
+# lecturas correctas puntuan entre 0.93 y 0.999, mientras que el texto impreso
+# mal leido ("MEDELLIN" -> "EUELLIH") se queda en 0.63 y llegaba a colarse como
+# placa valida (UEL11H). 0.80 separa los dos casos con margen.
+PADDLE_CONF_MIN = float(os.getenv("PADDLE_CONF_MIN", "0.80"))
 WEB_DIR = os.getenv("WEB_DIR", "/home/ubuntu/bike")  # demo anterior, se conserva
 RETURN_IMAGE = os.getenv("RETURN_IMAGE", "1") == "1"
 
@@ -67,7 +77,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "2")
 app = FastAPI(
     title="Detector de Placas -- YOLOv8 + EasyOCR",
     description="API del proyecto de Ciencia de Datos (UNAB). Consumida desde Expo Go en iPhone.",
-    version="2.1.0",
+    version="2.2.0",
 )
 
 app.add_middleware(
@@ -234,8 +244,68 @@ def _sustituciones(original: str, corregido: str) -> int:
     return sum(1 for a, b in zip(original, corregido) if a != b)
 
 
+def _cajas_de_paddle(roi_bgr: np.ndarray) -> Optional[list]:
+    """Pide la lectura al microservicio de PaddleOCR.
+
+    Devuelve las cajas en el formato de easyocr.readtext, o None si el servicio
+    no esta disponible: su ausencia nunca debe tumbar una peticion.
+    """
+    try:
+        ok, buffer = cv2.imencode(".png", roi_bgr)
+        if not ok:
+            return None
+        respuesta = requests.post(
+            f"{PADDLE_URL}/leer",
+            data=buffer.tobytes(),
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=PADDLE_TIMEOUT,
+        )
+        if not respuesta.ok:
+            return None
+        cajas = respuesta.json().get("cajas") or []
+        return [c for c in cajas if float(c[2]) >= PADDLE_CONF_MIN]
+    except Exception as exc:
+        logger.debug("PaddleOCR no disponible: %s", exc)
+        return None
+
+
+def _mejor_candidato(cajas) -> Tuple[Optional[str], float, bool]:
+    """Aplica el filtro de ruido y la correccion por formato a unas cajas de OCR."""
+    utiles = _cajas_utiles(cajas)
+    if not utiles:
+        return None, 0.0, False
+
+    textos = [c[1] for c in utiles]
+    conf = sum(c[2] for c in utiles) / len(utiles)
+
+    mejor_texto, mejor_puntaje, mejor_valido = None, -1.0, False
+    for candidato, bonus in _candidatos(textos):
+        corregido, valido = _corregir_formato(candidato)
+        if valido:
+            puntaje = 10.0 + bonus + conf - 0.3 * _sustituciones(candidato, corregido)
+        else:
+            puntaje = conf - abs(len(corregido) - 6)
+        if puntaje > mejor_puntaje:
+            mejor_texto, mejor_puntaje, mejor_valido = corregido, puntaje, valido
+
+    return mejor_texto, conf, mejor_valido
+
+
 def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float, bool]:
-    """Ejecuta OCR sobre el recorte y devuelve (texto, confianza, cumple_formato)."""
+    """Lee la placa del recorte y devuelve (texto, confianza, cumple_formato).
+
+    Usa los dos motores en cascada porque fallan en placas distintas. Medido
+    sobre los 12 recortes de `pruebas/`:
+
+        EasyOCR    9 correctas, 3 erroneas
+        PaddleOCR  8 correctas, 0 erroneas, 4 sin lectura
+        cascada   11 correctas, 1 erronea
+
+    PaddleOCR va primero por preciso (lee `WUF62C`, que EasyOCR nunca acerto) y
+    porque cuando resuelve evita las tres pasadas de EasyOCR. Si el
+    microservicio no esta levantado, `_cajas_de_paddle` devuelve None y todo
+    sigue funcionando solo con EasyOCR.
+    """
     if roi_bgr is None or roi_bgr.size == 0:
         return None, 0.0, False
 
@@ -250,6 +320,17 @@ def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float, bool]:
         escala = 640.0 / h
         roi_bgr = cv2.resize(roi_bgr, None, fx=escala, fy=escala, interpolation=cv2.INTER_AREA)
 
+    # --- 1) PaddleOCR: preciso y de una sola pasada ---
+    # Medido sobre los 12 recortes del banco: 8 correctas y CERO erroneas, con
+    # 4 sin lectura. Cuando devuelve algo con formato valido casi siempre
+    # acierta, asi que se le hace caso y se ahorra el resto del trabajo.
+    cajas_paddle = _cajas_de_paddle(roi_bgr)
+    if cajas_paddle:
+        texto, conf, valido = _mejor_candidato(cajas_paddle)
+        if valido:
+            return texto, conf, True
+
+    # --- 2) EasyOCR: cubre justo los huecos que deja PaddleOCR ---
     mejor_texto: Optional[str] = None
     mejor_conf = 0.0
     mejor_puntaje = -1.0

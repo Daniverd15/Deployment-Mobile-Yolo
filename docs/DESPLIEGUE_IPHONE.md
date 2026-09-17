@@ -166,13 +166,13 @@ incluye motos y una escena de trafico con varios vehiculos):
 | `JXV321_kia.jpg` | JXV321 | **JXV321** | ok |
 | `COH262-IJO387-WCT308-FRL260-VCU458_trafico.jpg` | 5 placas | **COH262**, **IJO387**, **FRL260** | 3/5 |
 | `SMU002-SMV098_taxis.jpg` | SMU002 / SMV098 | **SMU002**, SHV098 | 1/2 |
-| `WUF62C_moto.jpg` | WUF62C | MUF282 | 0/1 |
+| `WUF62C_moto.jpg` | WUF62C | **WUF62C** | ok |
 | `AEH01H_moto.jpg` | AEH01H | **AEH01H** | ok |
 | `JNU540_carroprueba.jpg` | JNU540 | **JNU540** | ok |
 
-**9 lecturas correctas de 13 placas visibles**, entre 2 y 6 s por foto.
+**10 lecturas correctas de 13 placas visibles**, entre 3 y 12 s por foto.
 
-Antes de los ajustes de deteccion eran 7. Las dos que se ganaron (`IJO387` y `FRL260`) ni
+Antes de los ajustes de deteccion eran 7, y con un solo motor de OCR 9. Las dos que se ganaron (`IJO387` y `FRL260`) ni
 siquiera se detectaban: aparecieron al subir `imgsz`. El denominador tambien cambio, porque la
 foto de trafico ahora declara sus 5 placas reales en el nombre y no solo una.
 
@@ -202,7 +202,48 @@ Los dos fallos son honestos y vale la pena nombrarlos:
   devuelve `IWUF262C` en una sola caja. De ahi salen dos lecturas con formato valido —`WUF262`
   (carro) y `WUF62C` (moto)— y gana la equivocada.
 
-### Que se probo para subir de 7/9 (y por que no se quedo)
+
+### Dos motores de OCR en cascada
+
+`WUF62C` resistio todos los intentos con EasyOCR. Se probo un segundo motor y resulto que **los
+dos fallan en placas distintas**, medido sobre los 12 recortes del banco:
+
+| Motor | Correctas | Erroneas | Sin lectura |
+|---|---|---|---|
+| EasyOCR | 9 | 3 | 0 |
+| PaddleOCR | 8 | 0 | 4 |
+| **Cascada** | **10** | 1 | 0 |
+
+PaddleOCR es mas preciso pero lee menos: cuando devuelve algo con formato valido casi siempre
+acierta (`WUF62C` con confianza 0.999), y cuando duda no devuelve nada. EasyOCR cubre esos huecos.
+Por eso PaddleOCR va primero y EasyOCR queda de respaldo.
+
+Se le exige a PaddleOCR una confianza minima de **0.80**: sus lecturas correctas puntuan entre
+0.93 y 0.999, mientras que el texto impreso mal leido (`MEDELLIN` -> `EUELLIH`, 0.63) llegaba a
+colarse como si fuera una placa (`UEL11H`).
+
+**Corre en su propio servicio** (`ocr-paddle`, en `127.0.0.1:8091`) por dos razones: instalarlo en
+el venv del servidor bajaria numpy de 2.5 a 2.3 y metaria un segundo OpenCV, y ocupa ~600 MB de
+RSS en una instancia de 911 MB. Es **opcional**: si se apaga, el servidor sigue funcionando solo
+con EasyOCR y vuelve a 9 aciertos.
+
+```bash
+sudo systemctl status ocr-paddle     # estado del motor secundario
+sudo systemctl stop ocr-paddle       # apagarlo si la instancia va justa de RAM
+```
+
+> **Coste:** la cascada sube la latencia de 2-6 s a 3-12 s por foto. El peor caso es cuando
+> PaddleOCR no lee nada y hay que correr igualmente las tres pasadas de EasyOCR.
+> En una instancia con mas memoria (t3.small) el margen seria mas comodo.
+
+### Lo que sigue sin resolverse
+
+- **`SMV098`** (se lee `SHV098`): el taxi esta movido y la letra ocupa unos 8 pixeles. Ningun
+  motor ni preprocesado la recupera.
+- **`WCT308` y `VCU458`** en la escena de trafico: el detector no las ve. Ahi el limite es el
+  modelo YOLO, no el OCR -- ver [`entrenamiento/`](../entrenamiento).
+
+### Que se probo y no se quedo
 
 | Intento | Resultado medido |
 |---|---|

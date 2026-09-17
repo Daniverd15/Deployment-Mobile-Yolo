@@ -1,0 +1,23 @@
+[Unit]
+Description=OCR PaddleOCR (motor secundario del detector de placas)
+After=network-online.target
+Wants=network-online.target
+# El servidor principal funciona sin este servicio: si no responde, usa solo EasyOCR
+Before=yolo-plates.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/proyecto
+# Venv propio: paddleocr exige numpy 2.3 y otro OpenCV, incompatibles con el
+# venv del servidor principal (numpy 2.5 + torch + easyocr)
+Environment="PADDLE_LANG=en"
+Environment="OMP_NUM_THREADS=2"
+# Solo escucha en localhost: es un componente interno, no se expone a internet
+ExecStart=/home/ubuntu/exp-venv/bin/uvicorn ocr_paddle:app --host 127.0.0.1 --port 8091 --workers 1
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
