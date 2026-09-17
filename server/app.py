@@ -26,10 +26,12 @@ from typing import List, Optional, Tuple
 import cv2
 import easyocr
 import numpy as np
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+# request.form() devuelve el UploadFile de Starlette, no el de FastAPI
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from ultralytics import YOLO
 
 # -------------------------
@@ -42,6 +44,7 @@ MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")
 OCR_LANGS = os.getenv("OCR_LANGS", "en").split(",")
 CONF_THRESH = float(os.getenv("CONF_THRESH", "0.25"))
 MAX_SIDE = int(os.getenv("MAX_SIDE", "1280"))        # lado maximo antes de inferir
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "32"))  # por campo del formulario
 WEB_DIR = os.getenv("WEB_DIR", "/home/ubuntu/bike")  # demo anterior, se conserva
 RETURN_IMAGE = os.getenv("RETURN_IMAGE", "1") == "1"
 
@@ -395,21 +398,68 @@ def health():
     }
 
 
-@app.post("/predict/")
-async def predict(
-    file: Optional[UploadFile] = File(None),
-    image_base64: Optional[str] = Form(None),
-):
+# El formulario se parsea a mano (en vez de con File()/Form()) solo para poder
+# subir el limite de 1 MB por campo que trae Starlette: FastAPI llama a
+# request.form() sin argumentos y no deja configurarlo por ruta. Con el limite
+# por defecto, mandar una foto de celular como base64 en un formulario devuelve
+# "Field exceeded maximum size of 1024KB" (una foto de iPhone a calidad alta
+# son ~1.9 MB en base64). openapi_extra conserva el formulario de /docs, que se
+# pierde al quitar File()/Form().
+ESQUEMA_PREDICT = {
+    "requestBody": {
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string", "format": "binary", "title": "Foto del vehiculo"},
+                        "image_base64": {"type": "string", "title": "Alternativa: imagen en base64"},
+                    },
+                }
+            },
+            "application/x-www-form-urlencoded": {
+                "schema": {
+                    "type": "object",
+                    "properties": {"image_base64": {"type": "string"}},
+                }
+            },
+        }
+    }
+}
+
+
+@app.post("/predict/", openapi_extra=ESQUEMA_PREDICT)
+async def predict(request: Request):
     """Recibe la foto como multipart (`file`) o como base64 (`image_base64`)."""
     try:
-        if file is not None:
-            frame = _decodificar(await file.read())
-        elif image_base64:
-            frame = _decodificar(_limpiar_base64(image_base64))
+        datos: Optional[bytes] = None
+
+        # cubre multipart/form-data y application/x-www-form-urlencoded
+        if "form" in (request.headers.get("content-type") or ""):
+            async with request.form(max_part_size=MAX_UPLOAD_MB * 1024 * 1024) as formulario:
+                archivo = formulario.get("file")
+                texto_b64 = formulario.get("image_base64")
+                if isinstance(archivo, StarletteUploadFile):
+                    datos = await archivo.read()
+                elif isinstance(texto_b64, str) and texto_b64:
+                    datos = _limpiar_base64(texto_b64)
         else:
+            # Tolerante con quien mande JSON a esta ruta en vez de a /predict_json/.
+            # Un cuerpo vacio o que no sea JSON debe caer en el 400 de mas abajo,
+            # no reventar con un 500.
+            try:
+                cuerpo = await request.json()
+            except Exception:
+                cuerpo = None
+            texto_b64 = cuerpo.get("image_base64") if isinstance(cuerpo, dict) else None
+            if texto_b64:
+                datos = _limpiar_base64(texto_b64)
+
+        if datos is None:
             return JSONResponse(status_code=400,
                                 content={"success": False, "error": "No se recibio ninguna imagen"})
 
+        frame = _decodificar(datos)
         if frame is None:
             return JSONResponse(status_code=400,
                                 content={"success": False, "error": "No se pudo decodificar la imagen"})
