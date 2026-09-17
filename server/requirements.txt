@@ -1,0 +1,17 @@
+# Versiones instaladas y verificadas en la EC2 (Ubuntu 24.04, Python 3.12, CPU).
+#
+# torch se instala aparte desde el indice CPU de PyTorch: el paquete normal
+# arrastra las librerias de CUDA (~2.5 GB) que en una t3.micro no caben ni sirven.
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0
+torchvision==0.29.0
+
+ultralytics==8.4.154
+easyocr==1.7.2
+opencv-python-headless==5.0.0.93
+numpy==2.5.2
+pillow==12.3.0
+
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-multipart==0.0.32

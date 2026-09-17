@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""API de deteccion de placas vehiculares -- YOLOv8 + EasyOCR.
+
+Basado en snippet/app.py del repositorio del profesor, con los ajustes que
+hicieron falta para el despliegue real en EC2 (t3.micro) y para consumirla
+desde un iPhone con Expo Go:
+
+  * limite de subida ampliado (las fotos del iPhone pesan varios MB)
+  * la imagen se reduce antes de inferir -> mas rapido en CPU
+  * OCR reforzado: recorte ampliado, variantes de preprocesado y correccion
+    por formato de placa colombiana (AAA123 / AAA12A)
+  * /health para el semaforo de conexion de la app y /web/ para no perder
+    la demo del laboratorio anterior
+  * CORS abierto: Expo Go sirve la app desde un origen distinto
+
+Requiere: fastapi uvicorn ultralytics easyocr opencv-python-headless pillow numpy python-multipart
+"""
+
+import os
+import re
+import base64
+import logging
+from difflib import SequenceMatcher
+from typing import List, Optional, Tuple
+
+import cv2
+import easyocr
+import numpy as np
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from ultralytics import YOLO
+
+# -------------------------
+# Config / Logging
+# -------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("yolo-plates")
+
+MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")
+OCR_LANGS = os.getenv("OCR_LANGS", "en").split(",")
+CONF_THRESH = float(os.getenv("CONF_THRESH", "0.25"))
+MAX_SIDE = int(os.getenv("MAX_SIDE", "1280"))        # lado maximo antes de inferir
+WEB_DIR = os.getenv("WEB_DIR", "/home/ubuntu/bike")  # demo anterior, se conserva
+RETURN_IMAGE = os.getenv("RETURN_IMAGE", "1") == "1"
+
+# En CPU con 2 vCPU, mas hilos que nucleos empeora la latencia.
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+
+# -------------------------
+# App init
+# -------------------------
+app = FastAPI(
+    title="Detector de Placas -- YOLOv8 + EasyOCR",
+    description="API del proyecto de Ciencia de Datos (UNAB). Consumida desde Expo Go en iPhone.",
+    version="2.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # la app movil no tiene un origen fijo
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------------------------
+# Carga de modelos (una sola vez, al arrancar)
+# -------------------------
+logger.info("Cargando modelo YOLOv8 desde %s ...", MODEL_PATH)
+model = YOLO(MODEL_PATH)
+logger.info("Modelo YOLOv8 cargado. Clases: %s", model.names)
+
+logger.info("Inicializando EasyOCR (idiomas=%s, gpu=False) ...", OCR_LANGS)
+reader = easyocr.Reader(OCR_LANGS, gpu=False)
+logger.info("EasyOCR listo.")
+
+# -------------------------
+# Helpers de OCR
+# -------------------------
+PLACA_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+# Texto impreso en las placas colombianas que no forma parte de la matricula
+RUIDO = {
+    "COLOMBIA", "BOGOTA", "BOGOTADC", "DC", "MEDELLIN", "CALI", "CUCUTA",
+    "BUCARAMANGA", "BARRANQUILLA", "CARTAGENA", "PEREIRA", "MANIZALES",
+}
+
+# Confusiones tipicas del OCR, segun si la posicion debe ser letra o digito
+A_LETRA = {"0": "O", "1": "I", "2": "Z", "5": "S", "8": "B", "6": "G", "4": "A"}
+A_DIGITO = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "Z": "2", "S": "5",
+            "B": "8", "G": "6", "A": "4"}
+
+# Carro: AAA123 | Moto: AAA12A
+RE_CARRO = re.compile(r"^[A-Z]{3}[0-9]{3}$")
+RE_MOTO = re.compile(r"^[A-Z]{3}[0-9]{2}[A-Z]$")
+
+
+def _solo_alnum(texto: str) -> str:
+    return "".join(ch for ch in texto if ch.isalnum()).upper()
+
+
+def _corregir_formato(texto: str) -> Tuple[str, bool]:
+    """Corrige confusiones letra/digito usando el formato de placa colombiana.
+
+    Devuelve (texto_corregido, cumple_formato).
+    """
+    t = _solo_alnum(texto)
+    if len(t) != 6:
+        return t, False
+
+    # Intento como placa de carro: 3 letras + 3 digitos
+    carro = "".join(A_LETRA.get(c, c) for c in t[:3]) + "".join(A_DIGITO.get(c, c) for c in t[3:])
+    if RE_CARRO.match(carro):
+        return carro, True
+
+    # Intento como placa de moto: 3 letras + 2 digitos + 1 letra
+    moto = (
+        "".join(A_LETRA.get(c, c) for c in t[:3])
+        + "".join(A_DIGITO.get(c, c) for c in t[3:5])
+        + A_LETRA.get(t[5], t[5])
+    )
+    if RE_MOTO.match(moto):
+        return moto, True
+
+    return t, False
+
+
+def _variantes(roi_bgr: np.ndarray) -> List[np.ndarray]:
+    """Variantes de preprocesado del recorte, para darle opciones al OCR."""
+    variantes = [cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)]
+
+    gris = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gris)
+    variantes.append(cv2.cvtColor(clahe, cv2.COLOR_GRAY2RGB))
+
+    _, otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    variantes.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2RGB))
+
+    return variantes
+
+
+def _es_ruido(texto: str) -> bool:
+    """`COLOMBIA` sale del OCR como COLONBIA, COLOMBLA, C0L0MBIA... hay que comparar difuso."""
+    if texto in RUIDO:
+        return True
+    return any(SequenceMatcher(None, texto, palabra).ratio() >= 0.72 for palabra in RUIDO)
+
+
+def _cajas_utiles(resultado) -> List[Tuple[float, str, float]]:
+    """Filtra las cajas del OCR y deja solo las de la matricula, ordenadas izq -> der.
+
+    Dos filtros, en este orden:
+      1. altura: la matricula va en letra grande; `COLOMBIA` y la ciudad van en
+         letra chica debajo. Se descarta lo que mida menos del 60% de la caja
+         mas alta.
+      2. ruido: comparacion difusa contra el texto impreso conocido.
+    """
+    cajas = []
+    for caja, texto, conf in resultado:
+        limpio = _solo_alnum(texto)
+        if not limpio or len(limpio) > 8:
+            continue
+        xs = [p[0] for p in caja]
+        ys = [p[1] for p in caja]
+        cajas.append({
+            "x": min(xs),
+            "alto": max(ys) - min(ys),
+            "texto": limpio,
+            "conf": float(conf),
+        })
+
+    if not cajas:
+        return []
+
+    alto_max = max(c["alto"] for c in cajas)
+    cajas = [c for c in cajas if c["alto"] >= 0.6 * alto_max]
+    cajas = [c for c in cajas if not _es_ruido(c["texto"])]
+    cajas.sort(key=lambda c: c["x"])
+    return [(c["x"], c["texto"], c["conf"]) for c in cajas]
+
+
+def _candidatos(textos: List[str]) -> List[Tuple[str, float]]:
+    """Arma las lecturas posibles de la placa a partir de las cajas del OCR.
+
+    Una placa colombiana es `AAA (emblema) 123`. El emblema del centro y los
+    tornillos de las esquinas ensucian la lectura: `WUF (*) 62C` llega como
+    `IWUF262C` (tornillo + emblema leidos como caracteres). Por eso se prueban
+    varias formas de recortar los 6 caracteres reales.
+
+    Devuelve (candidato, bonus). El bonus desempata entre lecturas que cumplen
+    formato: respetar los limites de las cajas del OCR es mejor senal que
+    recortar una ventana a mitad de una caja.
+
+    Nota: se probo ademas generar candidatos saltando 1-2 caracteres en la
+    frontera letras/numeros (para el emblema) y una segunda pasada de OCR con
+    `width_ths` bajo. Medido sobre las 9 placas de `pruebas/`, empeoro de 7 a 5
+    aciertos: crea varios candidatos con formato valido y la misma puntuacion,
+    y el desempate termina siendo arbitrario. Se descarto a proposito.
+    """
+    candidatos: dict = {}
+
+    def agregar(cadena: str, bonus: float) -> None:
+        if cadena and bonus > candidatos.get(cadena, -1.0):
+            candidatos[cadena] = bonus
+
+    agregar("".join(textos), 0.5)                                   # todas las cajas
+    agregar("".join(t for t in textos if len(t) > 1), 0.4)          # sin cajas de 1 caracter
+    for i in range(len(textos)):                                    # quitando una caja
+        agregar("".join(textos[:i] + textos[i + 1:]), 0.3)
+
+    for cadena in list(candidatos):                                 # ventanas de 6
+        for i in range(len(cadena) - 6 + 1):
+            agregar(cadena[i:i + 6], 0.0)
+
+    return list(candidatos.items())
+
+
+def _sustituciones(original: str, corregido: str) -> int:
+    return sum(1 for a, b in zip(original, corregido) if a != b)
+
+
+def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float]:
+    """Ejecuta OCR sobre el recorte de la placa y devuelve (texto, confianza)."""
+    if roi_bgr is None or roi_bgr.size == 0:
+        return None, 0.0
+
+    # Los recortes pequenos leen mal: se agrandan a ~240 px de alto
+    h = roi_bgr.shape[0]
+    if h < 240:
+        escala = min(240.0 / max(h, 1), 4.0)
+        roi_bgr = cv2.resize(roi_bgr, None, fx=escala, fy=escala, interpolation=cv2.INTER_CUBIC)
+
+    mejor_texto: Optional[str] = None
+    mejor_conf = 0.0
+    mejor_puntaje = -1.0
+
+    for variante in _variantes(roi_bgr):
+        try:
+            resultado = reader.readtext(variante, allowlist=PLACA_ALLOWLIST)
+        except Exception as exc:  # defensivo: una variante mala no debe tumbar la peticion
+            logger.warning("OCR fallo en una variante: %s", exc)
+            continue
+
+        cajas = _cajas_utiles(resultado)
+        if not cajas:
+            continue
+
+        textos = [c[1] for c in cajas]
+        conf = sum(c[2] for c in cajas) / len(cajas)
+
+        for candidato, bonus in _candidatos(textos):
+            corregido, valido = _corregir_formato(candidato)
+            if valido:
+                # +10 asegura que cualquier lectura con formato de placa le gane a
+                # una sin formato; se penaliza corregir muchos caracteres.
+                puntaje = 10.0 + bonus + conf - 0.3 * _sustituciones(candidato, corregido)
+            else:
+                # sin formato valido: sirve solo como respaldo, y cuanto mas se
+                # aleje de los 6 caracteres, peor
+                puntaje = conf - abs(len(corregido) - 6)
+
+            if puntaje > mejor_puntaje:
+                mejor_texto, mejor_conf, mejor_puntaje = corregido, conf, puntaje
+
+        # Formato valido y OCR seguro: no hace falta probar mas variantes
+        if mejor_puntaje >= 10.0 and mejor_conf >= 0.6:
+            break
+
+    return (mejor_texto or None), mejor_conf
+
+
+# -------------------------
+# Helpers de imagen
+# -------------------------
+def imagen_a_base64_jpg(img_bgr: np.ndarray, calidad: int = 85) -> str:
+    _, buffer = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), calidad])
+    return base64.b64encode(buffer).decode("utf-8")
+
+
+def _decodificar(datos: bytes) -> Optional[np.ndarray]:
+    nparr = np.frombuffer(datos, np.uint8)
+    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+
+def _limpiar_base64(cadena: str) -> bytes:
+    if cadena.startswith("data:image"):
+        cadena = cadena.split(",", 1)[1]
+    cadena = cadena.strip().replace("\n", "").replace("\r", "").replace(" ", "+")
+    faltante = (-len(cadena)) % 4  # padding tolerante: el cliente a veces lo recorta
+    return base64.b64decode(cadena + "=" * faltante)
+
+
+def _reducir(frame: np.ndarray) -> np.ndarray:
+    """Las fotos del iPhone llegan a 4032 px; YOLO trabaja a 640 de todos modos."""
+    h, w = frame.shape[:2]
+    lado = max(h, w)
+    if lado <= MAX_SIDE:
+        return frame
+    escala = MAX_SIDE / lado
+    return cv2.resize(frame, (int(w * escala), int(h * escala)), interpolation=cv2.INTER_AREA)
+
+
+# -------------------------
+# Nucleo de deteccion
+# -------------------------
+def detectar(frame: np.ndarray) -> dict:
+    frame = _reducir(frame)
+    resultados = model.predict(source=frame, conf=CONF_THRESH, verbose=False)
+
+    if not resultados or len(resultados[0].boxes) == 0:
+        return {
+            "success": True,
+            "placas": [],
+            "num_placas": 0,
+            "detalles": [],
+            "image": imagen_a_base64_jpg(frame) if RETURN_IMAGE else None,
+            "message": "No se detectaron placas",
+        }
+
+    r = resultados[0]
+    cajas = r.boxes.xyxy.cpu().numpy()
+    confs = r.boxes.conf.cpu().numpy()
+    clases = r.boxes.cls.cpu().numpy()
+
+    placas: List[str] = []
+    detalles: List[dict] = []
+    h, w = frame.shape[:2]
+
+    for i, caja in enumerate(cajas):
+        x1, y1, x2, y2 = map(int, caja)
+        cls_id = int(clases[i]) if len(clases) > i else None
+        etiqueta = model.names.get(cls_id, "objeto") if cls_id is not None else "objeto"
+        conf_box = float(confs[i]) if len(confs) > i else 0.0
+
+        # Se amplia un poco el recorte: los bordes de la placa ayudan al OCR
+        margen_x = int((x2 - x1) * 0.04)
+        margen_y = int((y2 - y1) * 0.10)
+        x1c, y1c = max(0, x1 - margen_x), max(0, y1 - margen_y)
+        x2c, y2c = min(w, x2 + margen_x), min(h, y2 + margen_y)
+        roi = frame[y1c:y2c, x1c:x2c].copy()
+
+        texto = None
+        conf_ocr = 0.0
+        if any(k in etiqueta.lower() for k in ["placa", "plate", "license", "matricula"]):
+            texto, conf_ocr = leer_placa(roi)
+            if texto and texto not in placas:
+                placas.append(texto)
+                cv2.putText(frame, texto, (x1, max(30, y1 - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(frame, f"{etiqueta} {conf_box:.2f}", (x1, min(h - 8, y2 + 22)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+
+        detalles.append({
+            "label": etiqueta,
+            "conf_deteccion": round(conf_box, 3),
+            "texto": texto,
+            "conf_ocr": round(conf_ocr, 3),
+            "bbox": [x1, y1, x2, y2],
+        })
+
+    logger.info("Placas detectadas: %s", placas)
+    return {
+        "success": True,
+        "placas": placas,
+        "num_placas": len(placas),
+        "detalles": detalles,
+        "image": imagen_a_base64_jpg(frame) if RETURN_IMAGE else None,
+        "message": "OK" if placas else "Se detecto la placa pero no se pudo leer el texto",
+    }
+
+
+# -------------------------
+# Rutas
+# -------------------------
+@app.get("/")
+def home():
+    return {
+        "message": "YOLOv8 + OCR server running",
+        "version": app.version,
+        "endpoints": ["/predict/", "/predict_json/", "/health", "/docs", "/web/"],
+    }
+
+
+@app.get("/health")
+def health():
+    """Lo usa la app movil para el semaforo de conexion antes de disparar la foto."""
+    return {
+        "status": "ok",
+        "modelo": os.path.basename(MODEL_PATH),
+        "clases": list(model.names.values()),
+    }
+
+
+@app.post("/predict/")
+async def predict(
+    file: Optional[UploadFile] = File(None),
+    image_base64: Optional[str] = Form(None),
+):
+    """Recibe la foto como multipart (`file`) o como base64 (`image_base64`)."""
+    try:
+        if file is not None:
+            frame = _decodificar(await file.read())
+        elif image_base64:
+            frame = _decodificar(_limpiar_base64(image_base64))
+        else:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": "No se recibio ninguna imagen"})
+
+        if frame is None:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": "No se pudo decodificar la imagen"})
+
+        return detectar(frame)
+
+    except Exception as exc:
+        logger.exception("Error en /predict/")
+        return JSONResponse(status_code=500, content={"success": False, "error": str(exc)})
+
+
+@app.post("/predict_json/")
+async def predict_json(request: Request):
+    """Variante JSON pura: {"image_base64": "..."} -- la que usa la app de iPhone."""
+    try:
+        body = await request.json()
+        image_base64 = body.get("image_base64")
+        if not image_base64:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": "Falta image_base64"})
+
+        frame = _decodificar(_limpiar_base64(image_base64))
+        if frame is None:
+            return JSONResponse(status_code=400,
+                                content={"success": False, "error": "No se pudo decodificar la imagen"})
+
+        return detectar(frame)
+
+    except Exception as exc:
+        logger.exception("Error en /predict_json/")
+        return JSONResponse(status_code=500, content={"success": False, "error": str(exc)})
+
+
+# Demo web del laboratorio anterior: se conserva bajo /web/ para no perderla
+if os.path.isdir(WEB_DIR):
+    app.mount("/web", StaticFiles(directory=WEB_DIR, html=True), name="web")
+    logger.info("Demo estatica montada en /web/ desde %s", WEB_DIR)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    puerto = int(os.getenv("PORT", "8080"))
+    logger.info("Iniciando servidor en 0.0.0.0:%s", puerto)
+    uvicorn.run("app:app", host="0.0.0.0", port=puerto, reload=False)
