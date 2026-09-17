@@ -9,9 +9,10 @@
 > | [`app-movil/`](app-movil) | App Expo (expo-router + expo-camera + expo-speech) |
 > | [`server/`](server) | API FastAPI lista para produccion, servicio systemd y script de despliegue |
 > | [`pruebas/`](pruebas) | Banco de 8 fotos con placas reales y script de verificacion |
+> | [`entrenamiento/`](entrenamiento) | Como reentrenar el detector y por que hace falta |
 > | [`docs/DESPLIEGUE_IPHONE.md`](docs/DESPLIEGUE_IPHONE.md) | **Guia paso a paso para el iPhone** |
 >
-> Resultado medido sobre el banco de pruebas: **7 de 9 placas leidas exactamente**, 1.2–5.3 s por foto
+> Resultado medido sobre el banco de pruebas: **9 lecturas correctas de 13 placas visibles**, 2–6 s por foto
 > en una `t3.micro` (CPU). El detalle, incluidos los dos fallos y los arreglos que se probaron y se
 > descartaron por empeorar la medicion, esta en la guia.
 
