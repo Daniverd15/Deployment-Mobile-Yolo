@@ -16,15 +16,22 @@ De ahi salen los dos fallos de deteccion que se midieron con la app:
     baja resolucion. Las placas lejanas (menos de ~60 px de ancho) no las
     detecta: en la foto de trafico del banco de pruebas encuentra 3 de 5.
 
-Este script entrena con los ajustes que atacan eso. Pensado para Google Colab
-con GPU (Entorno de ejecucion -> Cambiar tipo de entorno -> T4 GPU).
-En CPU no vale la pena intentarlo: son dias.
+Este script entrena con los ajustes que atacan eso, usando YOLO11.
+
+Si prefieres Colab, hay un notebook listo con todo el flujo (incluida la
+descarga del dataset y las pruebas de rotacion):
+
+    entrenamiento/entrenar_yolo11_colab.ipynb
+
+Necesita GPU (en Colab: Entorno de ejecucion -> Cambiar tipo de entorno ->
+T4 GPU). En CPU no vale la pena intentarlo: son dias.
 
     pip install ultralytics
     python entrenar.py --data /ruta/data.yaml
 
-El dataset original es `car_detect-1`, exportado de Roboflow en formato YOLOv8.
-No esta en el repositorio; hay que pedirselo al profesor o exportarlo de nuevo.
+El dataset recomendado es `license-plate-recognition-rxg4e` de Roboflow
+Universe (10.125 imagenes, exporta a YOLOv11); ver el README de esta carpeta
+para el porque y para las alternativas colombianas.
 """
 
 import argparse
@@ -101,9 +108,12 @@ def validar(pesos: str, data: str, imgsz: int) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", required=True, help="ruta al data.yaml del dataset")
-    # yolov8s tiene 11M parametros frente a los 3M del nano: es el salto que mas
-    # rinde para objetos pequenos sin volverse lento en CPU.
-    parser.add_argument("--modelo", default="yolov8s.pt")
+    # yolo11s tiene 9.5M parametros frente a los 3.0M del nano actual: es el salto
+    # que mas rinde en objetos pequenos. Medido en la propia t3.micro, inferir a
+    # 1280 le cuesta 0.78 s frente a los 0.30 s del modelo actual; si esa latencia
+    # molesta, usa --modelo yolo11n.pt, que cuesta lo mismo que el actual y aun asi
+    # gana la rotacion y las aumentaciones.
+    parser.add_argument("--modelo", default="yolo11s.pt")
     parser.add_argument("--epocas", type=int, default=100)
     # Entrenar a 960 acerca el entrenamiento a como se infiere en el servidor
     # (imgsz=1280), que fue lo que mas subio la deteccion de placas lejanas.
