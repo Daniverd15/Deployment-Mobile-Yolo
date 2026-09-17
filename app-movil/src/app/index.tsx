@@ -146,9 +146,12 @@ export default function PantallaDetector() {
     setVerAnalizada(false);
 
     try {
-      // quality 0.5: una foto del iPhone pasa de ~4 MB a ~700 KB sin que el
-      // OCR pierda lectura, y la subida por datos moviles deja de ser el cuello de botella
-      const foto = await camara.current.takePictureAsync({ quality: 0.5, base64: true });
+      // quality 0.8 y no 0.5. Se midio recomprimiendo el banco de pruebas: a 0.5
+      // el sistema lee 7 placas y a 0.65-0.8 lee 9, y en la escena de trafico
+      // pasa de encontrar 1 placa a encontrar 3. La compresion se come el texto
+      // pequeno, que es justo el de las placas lejanas. La foto sube de ~700 KB
+      // a ~1.5 MB: la subida tarda algo mas, pero perder placas sale mas caro.
+      const foto = await camara.current.takePictureAsync({ quality: 0.8, base64: true });
       if (!foto?.base64) throw new Error('La camara no devolvio la imagen.');
       setFotoCongelada(foto.uri);
 
