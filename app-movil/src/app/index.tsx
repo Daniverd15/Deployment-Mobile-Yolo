@@ -28,7 +28,10 @@ const CLAVE_ALMACEN = 'detector-placas:servidor';
 // La inferencia en la EC2 (CPU, t3.micro) tarda entre 1 y 6 s; se suma la
 // subida de la foto desde datos moviles.
 const TIMEOUT_ANALISIS_MS = 45000;
-const TIMEOUT_SALUD_MS = 6000;
+// 12 s y no 6: la EC2 es modesta y cuando esta ocupada tarda en contestar el
+// /health. Con 6 s la app marcaba "Sin conexion" con el servidor perfectamente
+// vivo, que asusta en mitad de una demo.
+const TIMEOUT_SALUD_MS = 12000;
 
 type Estado = 'verificando' | 'conectado' | 'sin_conexion';
 

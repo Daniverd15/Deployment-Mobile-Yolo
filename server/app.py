@@ -77,7 +77,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "2")
 app = FastAPI(
     title="Detector de Placas -- YOLOv8 + EasyOCR",
     description="API del proyecto de Ciencia de Datos (UNAB). Consumida desde Expo Go en iPhone.",
-    version="2.2.0",
+    version="2.3.0",
 )
 
 app.add_middleware(
@@ -95,9 +95,21 @@ logger.info("Cargando modelo YOLOv8 desde %s ...", MODEL_PATH)
 model = YOLO(MODEL_PATH)
 logger.info("Modelo YOLOv8 cargado. Clases: %s", model.names)
 
-logger.info("Inicializando EasyOCR (idiomas=%s, gpu=False) ...", OCR_LANGS)
-reader = easyocr.Reader(OCR_LANGS, gpu=False)
-logger.info("EasyOCR listo.")
+# EasyOCR se carga solo cuando hace falta. Ocupa ~400 MB y en esta instancia de
+# 911 MB eso es la diferencia entre responder rapido y irse a swap. Como
+# PaddleOCR resuelve la mayoria de las placas, en una sesion normal EasyOCR no
+# llega a cargarse nunca; cuando aparece una placa dificil, se carga una vez
+# (~7 s) y ya se queda.
+_reader = None
+
+
+def obtener_reader():
+    global _reader
+    if _reader is None:
+        logger.info("Inicializando EasyOCR bajo demanda (idiomas=%s) ...", OCR_LANGS)
+        _reader = easyocr.Reader(OCR_LANGS, gpu=False)
+        logger.info("EasyOCR listo.")
+    return _reader
 
 # -------------------------
 # Helpers de OCR
@@ -151,17 +163,19 @@ def _corregir_formato(texto: str) -> Tuple[str, bool]:
 
 
 def _variantes(roi_bgr: np.ndarray) -> List[np.ndarray]:
-    """Variantes de preprocesado del recorte, para darle opciones al OCR."""
-    variantes = [cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)]
+    """Variantes de preprocesado del recorte, para darle opciones al OCR.
 
+    Solo dos, y cada una se gano su sitio: midiendo cual era LA UNICA que
+    acertaba una placa del banco, RGB aporta `IJO387` y CLAHE aporta `SMU002`.
+    Habia una tercera variante (Otsu) que no fue la unica en acertar ninguna
+    placa y costaba ~10 s sobre el banco completo: se quito.
+    """
     gris = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gris)
-    variantes.append(cv2.cvtColor(clahe, cv2.COLOR_GRAY2RGB))
-
-    _, otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    variantes.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2RGB))
-
-    return variantes
+    return [
+        cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB),
+        cv2.cvtColor(clahe, cv2.COLOR_GRAY2RGB),
+    ]
 
 
 def _es_ruido(texto: str) -> bool:
@@ -337,7 +351,7 @@ def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float, bool]:
 
     for variante in _variantes(roi_bgr):
         try:
-            resultado = reader.readtext(variante, allowlist=PLACA_ALLOWLIST)
+            resultado = obtener_reader().readtext(variante, allowlist=PLACA_ALLOWLIST)
         except Exception as exc:  # defensivo: una variante mala no debe tumbar la peticion
             logger.warning("OCR fallo en una variante: %s", exc)
             continue
@@ -558,6 +572,10 @@ def health():
         "status": "ok",
         "modelo": os.path.basename(MODEL_PATH),
         "clases": list(model.names.values()),
+        "motores": {
+            "paddleocr": _cajas_de_paddle(np.zeros((32, 96, 3), np.uint8)) is not None,
+            "easyocr_cargado": _reader is not None,
+        },
     }
 
 

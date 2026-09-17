@@ -170,7 +170,7 @@ incluye motos y una escena de trafico con varios vehiculos):
 | `AEH01H_moto.jpg` | AEH01H | **AEH01H** | ok |
 | `JNU540_carroprueba.jpg` | JNU540 | **JNU540** | ok |
 
-**10 lecturas correctas de 13 placas visibles**, entre 3 y 12 s por foto.
+**10 lecturas correctas de 13 placas visibles**, entre 2.6 y 5.3 s por foto.
 
 Antes de los ajustes de deteccion eran 7, y con un solo motor de OCR 9. Las dos que se ganaron (`IJO387` y `FRL260`) ni
 siquiera se detectaban: aparecieron al subir `imgsz`. El denominador tambien cambio, porque la
@@ -232,9 +232,25 @@ sudo systemctl status ocr-paddle     # estado del motor secundario
 sudo systemctl stop ocr-paddle       # apagarlo si la instancia va justa de RAM
 ```
 
-> **Coste:** la cascada sube la latencia de 2-6 s a 3-12 s por foto. El peor caso es cuando
-> PaddleOCR no lee nada y hay que correr igualmente las tres pasadas de EasyOCR.
-> En una instancia con mas memoria (t3.small) el margen seria mas comodo.
+### Memoria y velocidad
+
+Los tres modelos (YOLO + PaddleOCR + EasyOCR) no caben holgados en los 911 MB de una `t3.micro`.
+Dos medidas lo mantienen usable:
+
+- **EasyOCR se carga bajo demanda.** Ocupa ~400 MB y, como PaddleOCR resuelve la mayoria de las
+  placas, en una sesion normal no llega a cargarse. La primera placa dificil paga ~7 s de carga
+  una sola vez. `GET /health` informa si ya esta cargado (`motores.easyocr_cargado`).
+- **Dos variantes de preprocesado, no tres.** Se midio cual era LA UNICA en acertar cada placa:
+  RGB aporta `IJO387`, CLAHE aporta `SMU002`, y Otsu no aportaba ninguna mientras costaba ~10 s
+  sobre el banco. Se quito.
+
+Con los modelos ya calientes: **2.6-5.3 s por foto**. Si la instancia esta ocupada y llega a swap,
+puede tardar mas y la app llegaba a marcar *"Sin conexion"* con el servidor vivo; por eso el
+chequeo de salud de la app espera ahora 12 s y no 6.
+
+> **El arreglo de fondo es mas memoria.** Una `t3.small` (2 GB) mantiene los tres modelos en RAM
+> sin swap. Ojo: al cambiar el tipo de instancia hay que pararla, y **la IP publica cambia** salvo
+> que se asocie una Elastic IP; habria que actualizarla en la app.
 
 ### Lo que sigue sin resolverse
 
