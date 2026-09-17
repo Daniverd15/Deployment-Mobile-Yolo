@@ -57,6 +57,26 @@ OCR_LANGS = os.getenv("OCR_LANGS", "en").split(",")
 # No subir de 0.50: la placa FRL260 de la escena de trafico puntua 0.546.
 CONF_THRESH = float(os.getenv("CONF_THRESH", "0.45"))
 MAX_SIDE = int(os.getenv("MAX_SIDE", "1280"))        # lado maximo antes de inferir
+# Lado maximo de la imagen que se conserva para el OCR. Una foto de iPhone de
+# 4032x3024 son 36 MB en memoria solo como array, y con la decodificacion y las
+# copias una peticion llegaba a reservar mas de 100 MB. En una instancia de
+# 911 MB eso obliga a paginar en cada foto (se midieron 3.5 millones de paginas
+# traidas de swap), y la app acaba mostrando "Sin conexion" porque el servidor
+# tarda mas que su timeout.
+#
+# Medido con fotos de 4032 px sobre cuatro casos del banco:
+#     1280 -> 15.1 s en total, 5 placas correctas
+#     1920 -> 26.9 s,          5 correctas
+#     2560 -> 31.9 s,          5 correctas
+# Leer el OCR a mas resolucion DUPLICA el tiempo sin acertar una placa mas: los
+# recortes mas grandes hacen a EasyOCR mucho mas lento. De ahi el 1280.
+#
+# Matiz honesto: las imagenes del banco se reescalaron a 4032 px desde
+# originales de ~1200, asi que no tienen detalle real que ganar. Con una foto
+# genuinamente detallada de un carro lejano podria aportar algo. Si alguna vez
+# se comprueba, subir este valor (o MAX_ORIGINAL en el entorno) es todo el
+# cambio necesario.
+MAX_ORIGINAL = int(os.getenv("MAX_ORIGINAL", "1280"))
 # Resolucion de inferencia de YOLO. El defecto de ultralytics es 640, que
 # encoge una placa de 80 px a 40 y la pierde. A 1280 la escena de trafico pasa
 # de 2 a 3 placas y la confianza de la moto sube de 0.62 a 0.85, por 0.2 s mas:
@@ -468,6 +488,16 @@ def _detectar_en_alguna_orientacion(original: np.ndarray):
     return original, frame, resultados
 
 
+def _acotar_original(imagen: np.ndarray) -> np.ndarray:
+    """Limita la imagen que se guarda para el OCR, por memoria (ver MAX_ORIGINAL)."""
+    lado = max(imagen.shape[:2])
+    if lado <= MAX_ORIGINAL:
+        return imagen
+    escala = MAX_ORIGINAL / lado
+    return cv2.resize(imagen, (int(imagen.shape[1] * escala), int(imagen.shape[0] * escala)),
+                      interpolation=cv2.INTER_AREA)
+
+
 def detectar(original: np.ndarray) -> dict:
     """Detecta sobre la imagen reducida, pero lee el texto sobre la original.
 
@@ -477,6 +507,7 @@ def detectar(original: np.ndarray) -> dict:
     una foto de iPhone (4032 px) pierde dos tercios de su ancho al reducirla.
     Por eso la caja se detecta en la imagen chica y se recorta de la grande.
     """
+    original = _acotar_original(original)
     original, frame, resultados = _detectar_en_alguna_orientacion(original)
     # factor para llevar coordenadas de la imagen reducida a la original
     escala = original.shape[1] / frame.shape[1]

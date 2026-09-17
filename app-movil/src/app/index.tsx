@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as Speech from 'expo-speech';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -24,6 +25,9 @@ const SERVIDOR_POR_DEFECTO = (Constants.expoConfig?.extra as any)?.servidor ?? {
   puerto: '8080',
 };
 const CLAVE_ALMACEN = 'detector-placas:servidor';
+
+// Lado largo al que se reduce la foto antes de subirla (ver prepararParaSubir)
+const LADO_SUBIDA = 2048;
 
 // La inferencia en la EC2 (CPU, t3.micro) tarda entre 1 y 6 s; se suma la
 // subida de la foto desde datos moviles.
@@ -58,6 +62,37 @@ async function fetchConTimeout(url: string, opciones: RequestInit, ms: number) {
 /** "JNU540" -> "J N U 5 4 0" para que la voz deletree en vez de leer una palabra rara. */
 function deletrear(placa: string) {
   return placa.split('').join(' ');
+}
+
+/** Reduce la foto en el telefono antes de subirla, y la devuelve en base64.
+ *
+ * El iPhone toma fotos de 4032 px, pero el servidor detecta sobre 1280: subir
+ * la foto entera es gastar red a cambio de nada. Medido contra el banco de
+ * pruebas, con el lado largo a 2048 px se aciertan las mismas placas que con
+ * 4032 (7 de 8) pero el envio pasa de ~1.19 MB a ~466 KB, o sea 2.6 veces menos.
+ * Bajar mas si cuesta: a 1600 y a 1280 se pierde una placa.
+ *
+ * La compresion se aplica una sola vez, aqui, con la imagen ya reducida: la
+ * compresion JPEG dana el texto pequeno de las placas lejanas, asi que conviene
+ * hacerla lo mas tarde posible y una sola vez.
+ */
+async function prepararParaSubir(uri: string, ancho?: number, alto?: number): Promise<string> {
+  // El lado largo es el que se acota, sin importar si la foto salio vertical
+  const esHorizontal = (ancho ?? 0) >= (alto ?? 0);
+  const ladoLargo = Math.max(ancho ?? 0, alto ?? 0);
+  const acciones =
+    ladoLargo > LADO_SUBIDA
+      ? [{ resize: esHorizontal ? { width: LADO_SUBIDA } : { height: LADO_SUBIDA } }]
+      : []; // ya es pequena: no tiene sentido reescalarla hacia arriba
+
+  const resultado = await ImageManipulator.manipulateAsync(uri, acciones, {
+    compress: 0.8,
+    format: ImageManipulator.SaveFormat.JPEG,
+    base64: true,
+  });
+
+  if (!resultado.base64) throw new Error('No se pudo preparar la imagen para enviar.');
+  return resultado.base64;
 }
 
 export default function PantallaDetector() {
@@ -146,21 +181,20 @@ export default function PantallaDetector() {
     setVerAnalizada(false);
 
     try {
-      // quality 0.8 y no 0.5. Se midio recomprimiendo el banco de pruebas: a 0.5
-      // el sistema lee 7 placas y a 0.65-0.8 lee 9, y en la escena de trafico
-      // pasa de encontrar 1 placa a encontrar 3. La compresion se come el texto
-      // pequeno, que es justo el de las placas lejanas. La foto sube de ~700 KB
-      // a ~1.5 MB: la subida tarda algo mas, pero perder placas sale mas caro.
-      const foto = await camara.current.takePictureAsync({ quality: 0.8, base64: true });
-      if (!foto?.base64) throw new Error('La camara no devolvio la imagen.');
+      // Se captura sin comprimir y sin base64: la imagen que se sube se prepara
+      // abajo en un solo paso, para no comprimir dos veces.
+      const foto = await camara.current.takePictureAsync({ quality: 1 });
+      if (!foto?.uri) throw new Error('La camara no devolvio la imagen.');
       setFotoCongelada(foto.uri);
+
+      const base64 = await prepararParaSubir(foto.uri, foto.width, foto.height);
 
       const respuesta = await fetchConTimeout(
         `${urlBase}/predict_json/`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ image_base64: foto.base64 }),
+          body: JSON.stringify({ image_base64: base64 }),
         },
         TIMEOUT_ANALISIS_MS,
       );

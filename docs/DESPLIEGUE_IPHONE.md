@@ -122,7 +122,7 @@ iPhone en datos moviles. Es mas lento al cargar, pero es la opcion confiable en 
 |---|---|
 | **HTTP sin cifrar (ATS)** | iOS bloquea `http://` por App Transport Security. **Expo Go trae ATS desactivado**, asi que la API por HTTP funciona sin tocar nada. Para un build propio (dev build o TestFlight) haria falta `NSAllowsArbitraryLoads`, que ya esta declarado en `app.json` → `ios.infoPlist.NSAppTransportSecurity`. Lo correcto en produccion es poner HTTPS delante de la API. |
 | **Permiso de camara** | `NSCameraUsageDescription` en `app.json`. Si se rechaza, iOS no vuelve a preguntar: hay que ir a **Ajustes → Expo Go → Camara**. |
-| **Peso de la foto** | El iPhone toma fotos de ~4 MB. La app captura con `quality: 0.8` (~1.5 MB). Se probo con 0.5 para que la subida fuera mas rapida, pero **medido sobre el banco la compresion costaba placas**: a 0.5 se leen 7 y a 0.65-0.8 se leen 9, y en la escena de trafico se pasa de encontrar 1 placa a encontrar 3. La compresion se come el texto pequeno, que es el de las placas lejanas. |
+| **Peso de la foto** | El iPhone toma fotos de 4032 px, pero el servidor detecta sobre 1280: subir la foto entera es gastar red a cambio de nada. La app **reduce el lado largo a 2048 px** con `expo-image-manipulator` antes de subir. Medido contra el banco: a 2048 se aciertan las mismas placas que a 4032 (7 de 8) con el envio de ~1.19 MB a **~466 KB**. Bajar mas si cuesta: a 1600 y a 1280 se pierde una placa. La compresion se aplica una sola vez, ya reducida, porque dana el texto pequeno de las placas lejanas. |
 | **Limite de subida** | Starlette corta cada campo de formulario en 1 MB y devuelve `Field exceeded maximum size of 1024KB`: una foto de iPhone en base64 lo pasa de largo. FastAPI llama a `request.form()` sin argumentos, asi que `/predict/` parsea el formulario a mano para subir el limite a 32 MB. Verificado con un payload de 1.87 MB en los cuatro modos de envio. |
 | **Voz** | `expo-speech` con `language: 'es-CO'`. Deletrea la placa (`J N U 5 4 0`) porque leerla de corrido suena a palabra inventada. |
 | **Timeout** | 45 s para el analisis. La inferencia en CPU tarda 1–6 s, pero una subida lenta puede sumar bastante. |
@@ -231,6 +231,49 @@ con EasyOCR y vuelve a 9 aciertos.
 sudo systemctl status ocr-paddle     # estado del motor secundario
 sudo systemctl stop ocr-paddle       # apagarlo si la instancia va justa de RAM
 ```
+
+### Donde se va el tiempo (medido, no estimado)
+
+Separando red de proceso -- mandando la misma foto al servidor **desde el propio servidor**, para
+que la subida no cuente:
+
+| Etapa | Tiempo |
+|---|---|
+| Decodificar (PIL + EXIF) | 0.23 s |
+| Reducir para YOLO | 0.02 s |
+| **YOLO** a imgsz=1280 | 0.61 s |
+| **OCR** por placa | 0.4 - 4 s |
+| **Total en el servidor** | **1.6 - 4.2 s** |
+
+Lo que se percibe como lentitud desde el telefono es en su mayoria **la subida de la foto**, no el
+servidor. De ahi que la app reduzca la imagen antes de enviarla.
+
+Un aviso sobre medir esto: leer el OCR a mas resolucion parecia buena idea y se implemento asi,
+pero medido con fotos de 4032 px sobre cuatro casos del banco, **duplicaba el tiempo sin acertar
+una placa mas** (1280 -> 15.1 s y 5 correctas; 2560 -> 31.9 s y 5 correctas). Los recortes grandes
+hacen a EasyOCR mucho mas lento. Por eso `MAX_ORIGINAL` vale 1280.
+
+### PaddleOCR esta APAGADO por memoria
+
+Los tres modelos juntos (YOLO ~150 MB + EasyOCR ~400 MB + PaddleOCR ~600 MB) no caben en los
+911 MB de la `t3.micro`. Con los tres cargados la instancia pagina sin parar -- se midieron
+**3.5 millones de paginas traidas de swap** -- y entonces una peticion que deberia tardar 4 s
+tardaba 30, la app mostraba *"Sin conexion"* con el servidor perfectamente vivo, y el mismo
+recorte de 274x108 px tardaba 11 s en un caso y 0.4 s en otro.
+
+Con PaddleOCR apagado: swap a 0, `/health` en 0.26 s y proceso en 1.6-4.2 s. El coste es **una
+placa**: `WUF62C` (la moto) vuelve a leerse `MUF282`, asi que el banco baja de 10 a 9 correctas.
+
+```bash
+# volver a encenderlo (mas precision, riesgo de "Sin conexion")
+sudo systemctl enable --now ocr-paddle
+# apagarlo (estable y rapido)
+sudo systemctl disable --now ocr-paddle
+```
+
+Para tener las dos cosas hace falta mas memoria: una `t3.small` (2 GB) sostiene los tres modelos
+sin swap. Al cambiar el tipo de instancia hay que pararla y **la IP publica cambia** salvo que se
+asocie una Elastic IP.
 
 ### Memoria y velocidad
 
