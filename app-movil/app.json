@@ -1,0 +1,73 @@
+{
+  "expo": {
+    "name": "Detector de Placas",
+    "slug": "detector-placas",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "detectorplacas",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "co.edu.unab.detectorplacas",
+      "infoPlist": {
+        "NSCameraUsageDescription": "La app usa la camara para fotografiar la placa del vehiculo y enviarla al servidor de deteccion.",
+        "NSMicrophoneUsageDescription": "expo-camera declara el microfono aunque la app solo toma fotos.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
+    },
+    "android": {
+      "package": "co.edu.unab.detectorplacas",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B1220",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "permissions": ["CAMERA", "INTERNET"],
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "La app usa la camara para fotografiar la placa del vehiculo."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0B1220",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "servidor": {
+        "ip": "34.225.169.137",
+        "puerto": "8080"
+      }
+    }
+  }
+}
