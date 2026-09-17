@@ -229,11 +229,16 @@ def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float]:
     if roi_bgr is None or roi_bgr.size == 0:
         return None, 0.0
 
-    # Los recortes pequenos leen mal: se agrandan a ~240 px de alto
+    # Los recortes pequenos leen mal: se agrandan a ~240 px de alto.
+    # Los muy grandes (placa cercana en una foto de 4032 px) se acotan a 640:
+    # mas alla de ahi el OCR no mejora y si se vuelve lento.
     h = roi_bgr.shape[0]
     if h < 240:
         escala = min(240.0 / max(h, 1), 4.0)
         roi_bgr = cv2.resize(roi_bgr, None, fx=escala, fy=escala, interpolation=cv2.INTER_CUBIC)
+    elif h > 640:
+        escala = 640.0 / h
+        roi_bgr = cv2.resize(roi_bgr, None, fx=escala, fy=escala, interpolation=cv2.INTER_AREA)
 
     mejor_texto: Optional[str] = None
     mejor_conf = 0.0
@@ -308,8 +313,18 @@ def _reducir(frame: np.ndarray) -> np.ndarray:
 # -------------------------
 # Nucleo de deteccion
 # -------------------------
-def detectar(frame: np.ndarray) -> dict:
-    frame = _reducir(frame)
+def detectar(original: np.ndarray) -> dict:
+    """Detecta sobre la imagen reducida, pero lee el texto sobre la original.
+
+    YOLO no gana nada con mas de 1280 px (trabaja a 640 internamente) y reducir
+    la imagen es lo que mantiene la inferencia en pocos segundos en una CPU
+    modesta. El OCR es justo al reves: cada pixel cuenta, y una placa lejana en
+    una foto de iPhone (4032 px) pierde dos tercios de su ancho al reducirla.
+    Por eso la caja se detecta en la imagen chica y se recorta de la grande.
+    """
+    frame = _reducir(original)
+    # factor para llevar coordenadas de la imagen reducida a la original
+    escala = original.shape[1] / frame.shape[1]
     resultados = model.predict(source=frame, conf=CONF_THRESH, verbose=False)
 
     if not resultados or len(resultados[0].boxes) == 0:
@@ -342,7 +357,12 @@ def detectar(frame: np.ndarray) -> dict:
         margen_y = int((y2 - y1) * 0.10)
         x1c, y1c = max(0, x1 - margen_x), max(0, y1 - margen_y)
         x2c, y2c = min(w, x2 + margen_x), min(h, y2 + margen_y)
-        roi = frame[y1c:y2c, x1c:x2c].copy()
+
+        # El recorte para el OCR sale de la imagen original, a resolucion completa
+        alto_o, ancho_o = original.shape[:2]
+        ox1, oy1 = max(0, int(x1c * escala)), max(0, int(y1c * escala))
+        ox2, oy2 = min(ancho_o, int(x2c * escala)), min(alto_o, int(y2c * escala))
+        roi = original[oy1:oy2, ox1:ox2].copy()
 
         texto = None
         conf_ocr = 0.0

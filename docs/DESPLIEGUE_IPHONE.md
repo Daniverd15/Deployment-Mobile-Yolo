@@ -170,7 +170,15 @@ incluye motos y una escena de trafico con varios vehiculos):
 | `AEH01H_moto.jpg` | AEH01H | **AEH01H** | 3.1 s |
 | `JNU540_carroprueba.jpg` | JNU540 | **JNU540** | 2.2 s |
 
-**7 de 9 placas leidas exactamente.** Los dos fallos son honestos y vale la pena nombrarlos:
+**7 de 9 placas leidas exactamente.**
+
+> **Nota sobre resolucion:** YOLO detecta sobre la imagen reducida a 1280 px (mas alla de eso no
+> gana nada y la CPU se dispara), pero el recorte de la placa para el OCR se toma de la imagen
+> **original**. En una foto de iPhone (4032 px) una placa lejana perderia dos tercios de su ancho
+> si se leyera sobre la version reducida. Las fotos de este banco miden todas menos de 1280 px,
+> asi que la tabla de arriba no refleja esa ganancia: se nota en las fotos tomadas con el celular.
+
+Los dos fallos son honestos y vale la pena nombrarlos:
 
 - `SMV098` → `SKV098`: confusion **M/K** del OCR sobre un taxi lejano y borroso. Ninguna regla de
   formato lo arregla, porque ambas son letras en una posicion de letra.
@@ -178,8 +186,33 @@ incluye motos y una escena de trafico con varios vehiculos):
   devuelve `IWUF262C` en una sola caja. De ahi salen dos lecturas con formato valido —`WUF262`
   (carro) y `WUF62C` (moto)— y gana la equivocada.
 
-Se probaron dos arreglos para el caso de la moto (una segunda pasada de OCR con `width_ths` bajo
-para separar letras de numeros, y generar candidatos saltando el emblema). Medidos sobre este
-mismo banco, **bajaron el acierto de 7 a 5**: crean varios candidatos con formato valido y la misma
-puntuacion, y el desempate termina siendo arbitrario. Se descartaron a proposito; queda anotado en
-`server/app.py` para que nadie los reintente sin medir.
+### Que se probo para subir de 7/9 (y por que no se quedo)
+
+| Intento | Resultado medido |
+|---|---|
+| Segunda pasada de OCR con `width_ths` bajo + candidatos saltando el emblema | **7 -> 5**. Crea varias lecturas con formato valido y la misma puntuacion; el desempate acaba siendo arbitrario. |
+| Realce de nitidez (unsharp) y recorte ampliado a 480 px sobre la placa del taxi | La segunda letra sale `K`, `H` o `V` segun la variante, **nunca `M`**. La informacion no esta en la foto. |
+| Decodificador `beamsearch` en vez del voraz | Lecturas identicas al voraz en todo el banco. |
+| Bajar el umbral de deteccion de 0.25 a 0.05 | De 2 a 3 cajas en la escena de trafico, y la tercera es un duplicado. Las placas lejanas el detector no las ve. |
+| Partir el recorte en dos mitades (letras / numeros) | Acierta la estructura de la moto pero lee `MUF62C`; y rompe `JNU540` y `AEH01H`. |
+
+Todo esto queda anotado en `server/app.py` para que nadie lo reintente sin medir.
+
+### Por que no hay un 100%
+
+No es una cuestion de ajustar un parametro mas:
+
+- **`SMV098`** es un limite de la imagen. En el recorte (79x33 px) esa letra ocupa unos 8 pixeles;
+  ninguna variante de preprocesado la recupera. Y no es solo tamano: `COH262` se lee bien con solo
+  **58 px** de ancho porque esta nitida, mientras que la del taxi esta movida.
+- **`WUF62C`** es una ambiguedad real: el OCR entrega `IWUF262C` en una sola caja, y de ahi salen
+  `WUF262` (carro) y `WUF62C` (moto), **las dos con formato colombiano valido**. Sin geometria a
+  nivel de caracter no hay forma de decidir cual es.
+
+Subir de ahi no se logra afinando EasyOCR, que es un OCR de proposito general: pide un
+reconocedor entrenado especificamente con placas colombianas (un CRNN pequeno sobre recortes de
+placa), que es un proyecto en si mismo.
+
+**En la practica** el sistema acierta de forma consistente cuando la placa se ve nitida y ocupa una
+parte razonable del encuadre. Para la demo: acercarse lo suficiente y evitar el movimiento importa
+mucho mas que cualquier ajuste del servidor.
