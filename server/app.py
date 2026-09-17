@@ -48,7 +48,14 @@ logger = logging.getLogger("yolo-plates")
 
 MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")
 OCR_LANGS = os.getenv("OCR_LANGS", "en").split(",")
-CONF_THRESH = float(os.getenv("CONF_THRESH", "0.25"))
+# Umbral de deteccion. Medido sobre pruebas/, las placas reales que se leen bien
+# puntuan entre 0.546 y 0.962, asi que subirlo de 0.25 a 0.45 no cuesta ninguna
+# (10 lecturas correctas con ambos valores) y descarta detecciones debiles.
+# Hace falta porque cualquier rectangulo claro con texto -- una etiqueta pegada al
+# marco de un televisor, por ejemplo -- se parece a una placa, y si su lectura
+# encaja por casualidad en el formato colombiano se anunciaba como placa.
+# No subir de 0.50: la placa FRL260 de la escena de trafico puntua 0.546.
+CONF_THRESH = float(os.getenv("CONF_THRESH", "0.45"))
 MAX_SIDE = int(os.getenv("MAX_SIDE", "1280"))        # lado maximo antes de inferir
 # Resolucion de inferencia de YOLO. El defecto de ultralytics es 640, que
 # encoge una placa de 80 px a 40 y la pierde. A 1280 la escena de trafico pasa
