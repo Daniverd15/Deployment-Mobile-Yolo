@@ -1,20 +1,78 @@
-# Detección y Reconocimiento de Placas Vehiculares con YOLOv8 + FastAPI
-> ## Despliegue movil en iPhone (Expo Go) — aporte de este fork
->
-> Este fork agrega el **despliegue completo end-to-end**: la API desplegada como servicio en EC2
-> y una app **Expo** que corre en **iPhone a traves de Expo Go**, sin Mac ni cuenta de Apple Developer.
->
-> | Carpeta | Que hay |
-> |---|---|
-> | [`app-movil/`](app-movil) | App Expo (expo-router + expo-camera + expo-speech) |
-> | [`server/`](server) | API FastAPI lista para produccion, servicio systemd y script de despliegue |
-> | [`pruebas/`](pruebas) | Banco de 8 fotos con placas reales y script de verificacion |
-> | [`entrenamiento/`](entrenamiento) | Como reentrenar el detector y por que hace falta |
-> | [`docs/DESPLIEGUE_IPHONE.md`](docs/DESPLIEGUE_IPHONE.md) | **Guia paso a paso para el iPhone** |
->
-> Resultado medido sobre el banco de pruebas: **9 lecturas correctas de 13 placas visibles**, 2–6 s por foto
-> en una `t3.micro` (CPU). El detalle, incluidos los dos fallos y los arreglos que se probaron y se
-> descartaron por empeorar la medicion, esta en la guia.
+# Detector de Placas Vehiculares — YOLOv8 + OCR + App iOS
+
+## Resultados de las pruebas
+
+Pruebas reales hechas desde un **iPhone con Expo Go** contra la API desplegada en AWS EC2.
+Cada captura es la pantalla de la app: arriba la foto tomada, abajo la placa leida.
+
+**13 placas leidas correctamente en 10 fotos**, incluyendo motos (formato `AAA12A`) y fotos con
+varias placas a la vez.
+
+### Carros
+
+| | | |
+|:---:|:---:|:---:|
+| <img src="pruebas/resultados/01_JNU540_swift.jpg" width="240"> | <img src="pruebas/resultados/02_GLT182_bmw.jpg" width="240"> | <img src="pruebas/resultados/03_JXV321_kia.jpg" width="240"> |
+| **JNU540** — Suzuki Swift | **GLT182** — BMW | **JXV321** — Kia Niro |
+| <img src="pruebas/resultados/04_IJO387_spark.jpg" width="240"> | <img src="pruebas/resultados/05_FRL260_chevrolet.jpg" width="240"> | <img src="pruebas/resultados/06_WCT308_furgon.jpg" width="240"> |
+| **IJO387** — Chevrolet Spark | **FRL260** — Chevrolet | **WCT308** — furgon |
+
+### Motos (formato `AAA12A`)
+
+| | |
+|:---:|:---:|
+| <img src="pruebas/resultados/07_WUF62C_moto.jpg" width="240"> | <img src="pruebas/resultados/08_AEH01H_moto.jpg" width="240"> |
+| **WUF62C** — Yamaha | **AEH01H** |
+
+### Varias placas en una sola foto
+
+| | |
+|:---:|:---:|
+| <img src="pruebas/resultados/09_dos_placas_SMU002_SMV098.jpg" width="260"> | <img src="pruebas/resultados/10_tres_placas_IZN10F_HIB85F_FOB63H.jpg" width="260"> |
+| **SMU002** y **SMV098** — dos taxis | **IZN10F**, **HIB85F** y **FOB63H** — tres placas |
+
+### Medicion reproducible
+
+El banco de pruebas y su script estan en el repositorio, para que cualquiera repita la medida:
+
+```bash
+python pruebas/probar_api.py --url http://34.225.169.137:8080
+```
+
+| Metrica | Valor |
+|---|---|
+| Placas leidas correctamente | **10 de 13** en el banco de archivos |
+| Tiempo por foto | **2 - 4 s** (EC2 `t3.micro`, sin GPU) |
+| Placas por foto | hasta **3** detectadas y leidas a la vez |
+
+Lo que **no** sale bien queda documentado con su causa en
+[`docs/DESPLIEGUE_IPHONE.md`](docs/DESPLIEGUE_IPHONE.md): dos placas de la escena de trafico que
+el detector no alcanza a ver, y una confusion `J` -> `O` en una placa lejana. La via para
+resolverlas es reentrenar el detector, con todo preparado en
+[`entrenamiento/`](entrenamiento).
+
+---
+
+## Como esta hecho
+
+```
+   iPhone                    PC (Windows)              AWS EC2 (Ubuntu 24.04)
+┌──────────────┐  QR/tunel  ┌────────────────┐      ┌──────────────────────────┐
+│   Expo Go    │◄──────────►│ npx expo start │      │ systemd: yolo-plates     │
+│  foto (JPEG) │            └────────────────┘      │  FastAPI + YOLOv8        │
+│      │       │                                    │ systemd: ocr-paddle      │
+│      └───────┼── POST /predict_json/ (internet) ─►│  PaddleOCR (mobile)      │
+│  placa + voz │◄─ JSON {placas, image, detalles} ──┤                          │
+└──────────────┘                                    └──────────────────────────┘
+```
+
+| Carpeta | Que hay |
+|---|---|
+| [`app-movil/`](app-movil) | App Expo para iPhone (expo-router + expo-camera + expo-speech) |
+| [`server/`](server) | API FastAPI, microservicio de OCR, servicios systemd y script de despliegue |
+| [`pruebas/`](pruebas) | Banco de fotos con placas reales y script de verificacion |
+| [`entrenamiento/`](entrenamiento) | Notebook de Colab para reentrenar el detector con YOLO11 |
+| [`docs/DESPLIEGUE_IPHONE.md`](docs/DESPLIEGUE_IPHONE.md) | **Guia paso a paso: del servidor al iPhone** |
 
 ---
 
