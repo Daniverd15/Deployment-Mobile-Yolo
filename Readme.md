@@ -1,4 +1,22 @@
 # Detección y Reconocimiento de Placas Vehiculares con YOLOv8 + FastAPI
+> ## Despliegue movil en iPhone (Expo Go) — aporte de este fork
+>
+> Este fork agrega el **despliegue completo end-to-end**: la API desplegada como servicio en EC2
+> y una app **Expo** que corre en **iPhone a traves de Expo Go**, sin Mac ni cuenta de Apple Developer.
+>
+> | Carpeta | Que hay |
+> |---|---|
+> | [`app-movil/`](app-movil) | App Expo (expo-router + expo-camera + expo-speech) |
+> | [`server/`](server) | API FastAPI lista para produccion, servicio systemd y script de despliegue |
+> | [`pruebas/`](pruebas) | Banco de 8 fotos con placas reales y script de verificacion |
+> | [`docs/DESPLIEGUE_IPHONE.md`](docs/DESPLIEGUE_IPHONE.md) | **Guia paso a paso para el iPhone** |
+>
+> Resultado medido sobre el banco de pruebas: **7 de 9 placas leidas exactamente**, 1.2–5.3 s por foto
+> en una `t3.micro` (CPU). El detalle, incluidos los dos fallos y los arreglos que se probaron y se
+> descartaron por empeorar la medicion, esta en la guia.
+
+---
+
 ## Objetivo
 
 Este proyecto implementa un sistema de detección automática de placas de vehículos y reconocimiento de caracteres (OCR) utilizando un modelo YOLOv8 entrenado mediante transfer learning y un servicio FastAPI para exponer un endpoint de inferencia.
