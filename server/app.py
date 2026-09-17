@@ -6,7 +6,10 @@ hicieron falta para el despliegue real en EC2 (t3.micro) y para consumirla
 desde un iPhone con Expo Go:
 
   * limite de subida ampliado (las fotos del iPhone pesan varios MB)
-  * la imagen se reduce antes de inferir -> mas rapido en CPU
+  * orientacion EXIF aplicada al decodificar: cv2 la ignora y el iPhone la usa
+    casi siempre, asi que el servidor recibia la foto girada y no detectaba nada
+  * deteccion a imgsz=1280 en vez de los 640 por defecto de ultralytics
+  * la imagen se reduce antes de inferir, pero el OCR lee sobre la original
   * OCR reforzado: recorte ampliado, variantes de preprocesado y correccion
     por formato de placa colombiana (AAA123 / AAA12A)
   * /health para el semaforo de conexion de la app y /web/ para no perder
@@ -16,6 +19,7 @@ desde un iPhone con Expo Go:
 Requiere: fastapi uvicorn ultralytics easyocr opencv-python-headless pillow numpy python-multipart
 """
 
+import io
 import os
 import re
 import base64
@@ -26,6 +30,7 @@ from typing import List, Optional, Tuple
 import cv2
 import easyocr
 import numpy as np
+from PIL import Image, ImageOps
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -44,6 +49,11 @@ MODEL_PATH = os.getenv("MODEL_PATH", "best.pt")
 OCR_LANGS = os.getenv("OCR_LANGS", "en").split(",")
 CONF_THRESH = float(os.getenv("CONF_THRESH", "0.25"))
 MAX_SIDE = int(os.getenv("MAX_SIDE", "1280"))        # lado maximo antes de inferir
+# Resolucion de inferencia de YOLO. El defecto de ultralytics es 640, que
+# encoge una placa de 80 px a 40 y la pierde. A 1280 la escena de trafico pasa
+# de 2 a 3 placas y la confianza de la moto sube de 0.62 a 0.85, por 0.2 s mas:
+# nada al lado de los segundos que tarda el OCR.
+IMGSZ = int(os.getenv("IMGSZ", "1280"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "32"))  # por campo del formulario
 WEB_DIR = os.getenv("WEB_DIR", "/home/ubuntu/bike")  # demo anterior, se conserva
 RETURN_IMAGE = os.getenv("RETURN_IMAGE", "1") == "1"
@@ -57,7 +67,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "2")
 app = FastAPI(
     title="Detector de Placas -- YOLOv8 + EasyOCR",
     description="API del proyecto de Ciencia de Datos (UNAB). Consumida desde Expo Go en iPhone.",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -224,10 +234,10 @@ def _sustituciones(original: str, corregido: str) -> int:
     return sum(1 for a, b in zip(original, corregido) if a != b)
 
 
-def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float]:
-    """Ejecuta OCR sobre el recorte de la placa y devuelve (texto, confianza)."""
+def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float, bool]:
+    """Ejecuta OCR sobre el recorte y devuelve (texto, confianza, cumple_formato)."""
     if roi_bgr is None or roi_bgr.size == 0:
-        return None, 0.0
+        return None, 0.0, False
 
     # Los recortes pequenos leen mal: se agrandan a ~240 px de alto.
     # Los muy grandes (placa cercana en una foto de 4032 px) se acotan a 640:
@@ -276,7 +286,8 @@ def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float]:
         if mejor_puntaje >= 10.0 and mejor_conf >= 0.6:
             break
 
-    return (mejor_texto or None), mejor_conf
+    # puntaje >= 10 significa que la lectura elegida cumple formato de placa
+    return (mejor_texto or None), mejor_conf, mejor_puntaje >= 10.0
 
 
 # -------------------------
@@ -288,8 +299,21 @@ def imagen_a_base64_jpg(img_bgr: np.ndarray, calidad: int = 85) -> str:
 
 
 def _decodificar(datos: bytes) -> Optional[np.ndarray]:
-    nparr = np.frombuffer(datos, np.uint8)
-    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    """Decodifica la imagen respetando la orientacion EXIF.
+
+    `cv2.imdecode` ignora el tag de orientacion. Las fotos del iPhone casi
+    siempre lo traen, asi que el servidor recibia la imagen girada 90 grados
+    mientras el telefono la mostraba derecha. Y una placa girada el detector no
+    la ve: medido sobre el banco, 90 grados pasa de 1 caja a **cero**.
+    """
+    try:
+        imagen = Image.open(io.BytesIO(datos))
+        imagen = ImageOps.exif_transpose(imagen)  # aplica el tag y lo elimina
+        return cv2.cvtColor(np.array(imagen.convert("RGB")), cv2.COLOR_RGB2BGR)
+    except Exception:
+        # Respaldo por si Pillow no reconoce el formato
+        nparr = np.frombuffer(datos, np.uint8)
+        return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
 
 def _limpiar_base64(cadena: str) -> bytes:
@@ -313,6 +337,35 @@ def _reducir(frame: np.ndarray) -> np.ndarray:
 # -------------------------
 # Nucleo de deteccion
 # -------------------------
+# Si la orientacion correcta falla, se prueban los giros de 90 en 90. Con EXIF
+# ya aplicado esto casi nunca hace falta, pero cubre las fotos sin tag o con el
+# tag mal puesto, que es justo cuando el detector devuelve cero cajas. Cada
+# intento cuesta ~0.3 s y solo se paga cuando no se encontro nada.
+_GIROS = [
+    (cv2.ROTATE_90_CLOCKWISE, "90 horario"),
+    (cv2.ROTATE_90_COUNTERCLOCKWISE, "90 antihorario"),
+    (cv2.ROTATE_180, "180"),
+]
+
+
+def _detectar_en_alguna_orientacion(original: np.ndarray):
+    """Devuelve (original, reducida, resultados) de la primera orientacion con placas."""
+    frame = _reducir(original)
+    resultados = model.predict(source=frame, conf=CONF_THRESH, imgsz=IMGSZ, verbose=False)
+    if resultados and len(resultados[0].boxes) > 0:
+        return original, frame, resultados
+
+    for giro, nombre in _GIROS:
+        girada = cv2.rotate(original, giro)
+        frame_girado = _reducir(girada)
+        intento = model.predict(source=frame_girado, conf=CONF_THRESH, imgsz=IMGSZ, verbose=False)
+        if intento and len(intento[0].boxes) > 0:
+            logger.info("Placas encontradas tras girar la imagen %s", nombre)
+            return girada, frame_girado, intento
+
+    return original, frame, resultados
+
+
 def detectar(original: np.ndarray) -> dict:
     """Detecta sobre la imagen reducida, pero lee el texto sobre la original.
 
@@ -322,10 +375,9 @@ def detectar(original: np.ndarray) -> dict:
     una foto de iPhone (4032 px) pierde dos tercios de su ancho al reducirla.
     Por eso la caja se detecta en la imagen chica y se recorta de la grande.
     """
-    frame = _reducir(original)
+    original, frame, resultados = _detectar_en_alguna_orientacion(original)
     # factor para llevar coordenadas de la imagen reducida a la original
     escala = original.shape[1] / frame.shape[1]
-    resultados = model.predict(source=frame, conf=CONF_THRESH, verbose=False)
 
     if not resultados or len(resultados[0].boxes) == 0:
         return {
@@ -352,8 +404,12 @@ def detectar(original: np.ndarray) -> dict:
         etiqueta = model.names.get(cls_id, "objeto") if cls_id is not None else "objeto"
         conf_box = float(confs[i]) if len(confs) > i else 0.0
 
-        # Se amplia un poco el recorte: los bordes de la placa ayudan al OCR
-        margen_x = int((x2 - x1) * 0.04)
+        # Se amplia el recorte: los bordes de la placa ayudan al OCR. El 8% no es
+        # arbitrario: a imgsz=1280 las cajas salen mas ajustadas y con el 4%
+        # anterior se recortaba el primer caracter (JNU540 se leia UNU540,
+        # WUF62C se leia MUF...). Medido sobre pruebas/: 4% -> 7 aciertos,
+        # 8% -> 9, 12% -> 8, 18% -> 8.
+        margen_x = int((x2 - x1) * 0.08)
         margen_y = int((y2 - y1) * 0.10)
         x1c, y1c = max(0, x1 - margen_x), max(0, y1 - margen_y)
         x2c, y2c = min(w, x2 + margen_x), min(h, y2 + margen_y)
@@ -366,9 +422,14 @@ def detectar(original: np.ndarray) -> dict:
 
         texto = None
         conf_ocr = 0.0
+        formato_ok = False
         if any(k in etiqueta.lower() for k in ["placa", "plate", "license", "matricula"]):
-            texto, conf_ocr = leer_placa(roi)
-            if texto and texto not in placas:
+            texto, conf_ocr, formato_ok = leer_placa(roi)
+            # Solo se anuncia lo que cumple formato colombiano. Una foto girada o
+            # muy borrosa produce lecturas como "IHTOHJ": la app las diria en voz
+            # alta como si fueran una placa. Se conservan en `detalles` para
+            # diagnostico, pero fuera de `placas`.
+            if texto and formato_ok and texto not in placas:
                 placas.append(texto)
                 cv2.putText(frame, texto, (x1, max(30, y1 - 10)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
@@ -382,6 +443,7 @@ def detectar(original: np.ndarray) -> dict:
             "conf_deteccion": round(conf_box, 3),
             "texto": texto,
             "conf_ocr": round(conf_ocr, 3),
+            "formato_valido": formato_ok,
             "bbox": [x1, y1, x2, y2],
         })
 
@@ -392,7 +454,7 @@ def detectar(original: np.ndarray) -> dict:
         "num_placas": len(placas),
         "detalles": detalles,
         "image": imagen_a_base64_jpg(frame) if RETURN_IMAGE else None,
-        "message": "OK" if placas else "Se detecto la placa pero no se pudo leer el texto",
+        "message": "OK" if placas else "Se detecto la placa pero la lectura no tiene formato valido",
     }
 
 

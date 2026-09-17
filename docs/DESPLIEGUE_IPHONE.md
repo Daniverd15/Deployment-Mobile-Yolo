@@ -159,18 +159,34 @@ sudo systemctl restart yolo-plates     # reiniciar
 `python pruebas/probar_api.py` contra las 8 fotos de `pruebas/` (9 placas en total,
 incluye motos y una escena de trafico con varios vehiculos):
 
-| Imagen | Esperado | Detectado | Tiempo |
+| Imagen | Esperado | Detectado | |
 |---|---|---|---|
-| `JNU540_swift.jpg` | JNU540 | **JNU540** | 5.0 s |
-| `GLT182_bmw.jpg` | GLT182 | **GLT182** | 3.3 s |
-| `JXV321_kia.jpg` | JXV321 | **JXV321** | 1.2 s |
-| `COH262_trafico.jpg` | COH262 | **COH262** | 5.3 s |
-| `SMU002-SMV098_taxis.jpg` | SMU002 / SMV098 | **SMU002**, SKV098 | 4.3 s |
-| `WUF62C_moto.jpg` | WUF62C | WUF262 | 1.3 s |
-| `AEH01H_moto.jpg` | AEH01H | **AEH01H** | 3.1 s |
-| `JNU540_carroprueba.jpg` | JNU540 | **JNU540** | 2.2 s |
+| `JNU540_swift.jpg` | JNU540 | **JNU540** | ok |
+| `GLT182_bmw.jpg` | GLT182 | **GLT182** | ok |
+| `JXV321_kia.jpg` | JXV321 | **JXV321** | ok |
+| `COH262-IJO387-WCT308-FRL260-VCU458_trafico.jpg` | 5 placas | **COH262**, **IJO387**, **FRL260** | 3/5 |
+| `SMU002-SMV098_taxis.jpg` | SMU002 / SMV098 | **SMU002**, SHV098 | 1/2 |
+| `WUF62C_moto.jpg` | WUF62C | MUF282 | 0/1 |
+| `AEH01H_moto.jpg` | AEH01H | **AEH01H** | ok |
+| `JNU540_carroprueba.jpg` | JNU540 | **JNU540** | ok |
 
-**7 de 9 placas leidas exactamente.**
+**9 lecturas correctas de 13 placas visibles**, entre 2 y 6 s por foto.
+
+Antes de los ajustes de deteccion eran 7. Las dos que se ganaron (`IJO387` y `FRL260`) ni
+siquiera se detectaban: aparecieron al subir `imgsz`. El denominador tambien cambio, porque la
+foto de trafico ahora declara sus 5 placas reales en el nombre y no solo una.
+
+### Los tres ajustes de deteccion que mas valieron
+
+| Ajuste | Por que | Efecto medido |
+|---|---|---|
+| **Orientacion EXIF** al decodificar | `cv2.imdecode` ignora el tag y el iPhone lo usa casi siempre: el servidor recibia la foto acostada | Una imagen girada 90 grados pasa de **0 cajas** a deteccion normal |
+| **`imgsz=1280`** en vez de los 640 por defecto | A 640 una placa de 80 px se encoge a 40 y se pierde | Escena de trafico: **2 -> 3 placas**; confianza de la moto 0.62 -> 0.85; coste 0.2 s |
+| **Margen de recorte 4% -> 8%** | Las cajas a 1280 salen mas ajustadas y cortaban el primer caracter (`JNU540` se leia `UNU540`) | 4% -> 7 aciertos, **8% -> 9**, 12% -> 8, 18% -> 8 |
+
+Ademas, **solo se anuncian lecturas con formato de placa colombiana**. Una foto girada producia
+cosas como `IHTOHJ` y la app las leia en voz alta como si fueran una matricula; ahora quedan en
+`detalles` con `formato_valido: false` y fuera de `placas`.
 
 > **Nota sobre resolucion:** YOLO detecta sobre la imagen reducida a 1280 px (mas alla de eso no
 > gana nada y la CPU se dispara), pero el recorte de la placa para el OCR se toma de la imagen
