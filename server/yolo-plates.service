@@ -1,0 +1,21 @@
+[Unit]
+Description=API Detector de Placas (FastAPI + YOLOv8 + EasyOCR)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/proyecto
+Environment="MODEL_PATH=/home/ubuntu/proyecto/best.pt"
+Environment="WEB_DIR=/home/ubuntu/bike"
+Environment="YOLO_CONFIG_DIR=/home/ubuntu/proyecto/.ultralytics"
+Environment="OMP_NUM_THREADS=2"
+ExecStart=/home/ubuntu/proyecto/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 75
+Restart=always
+RestartSec=5
+# La carga de YOLO + EasyOCR tarda ~1 min en t3.micro
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
