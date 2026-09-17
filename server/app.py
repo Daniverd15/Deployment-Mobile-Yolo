@@ -92,6 +92,10 @@ PADDLE_TIMEOUT = float(os.getenv("PADDLE_TIMEOUT", "20"))
 # mal leido ("MEDELLIN" -> "EUELLIH") se queda en 0.63 y llegaba a colarse como
 # placa valida (UEL11H). 0.80 separa los dos casos con margen.
 PADDLE_CONF_MIN = float(os.getenv("PADDLE_CONF_MIN", "0.80"))
+# EasyOCR como respaldo de PaddleOCR. Se puede apagar (USAR_EASYOCR=0) porque
+# los tres modelos no caben en 911 MB: ver la guia para la comparativa de las
+# tres configuraciones posibles.
+USAR_EASYOCR = os.getenv("USAR_EASYOCR", "1") == "1"
 WEB_DIR = os.getenv("WEB_DIR", "/home/ubuntu/bike")  # demo anterior, se conserva
 RETURN_IMAGE = os.getenv("RETURN_IMAGE", "1") == "1"
 
@@ -372,6 +376,13 @@ def leer_placa(roi_bgr: np.ndarray) -> Tuple[Optional[str], float, bool]:
             return texto, conf, True
 
     # --- 2) EasyOCR: cubre justo los huecos que deja PaddleOCR ---
+    if not USAR_EASYOCR:
+        # Sin respaldo: se devuelve lo que dijo Paddle aunque no cumpla formato,
+        # para que quede en `detalles` como diagnostico.
+        if cajas_paddle:
+            return _mejor_candidato(cajas_paddle)
+        return None, 0.0, False
+
     mejor_texto: Optional[str] = None
     mejor_conf = 0.0
     mejor_puntaje = -1.0
@@ -612,6 +623,7 @@ def health():
         "clases": list(model.names.values()),
         "motores": {
             "paddleocr": _cajas_de_paddle(np.zeros((32, 96, 3), np.uint8)) is not None,
+            "easyocr_habilitado": USAR_EASYOCR,
             "easyocr_cargado": _reader is not None,
         },
     }
