@@ -52,13 +52,15 @@ cp "$ORIGEN/app.py" "$PROYECTO/app.py"
 [ -f "$PROYECTO/best.pt" ] || { echo "FALTA best.pt en $PROYECTO"; exit 1; }
 mkdir -p "$PROYECTO/.ultralytics"
 
-# --- 4b. Segundo motor de OCR: PaddleOCR, en su propio venv ---------------
+# --- 4b. Motor de OCR principal: PaddleOCR, en su propio venv ----------------
 # Va aparte a proposito: paddleocr exige numpy 2.3 y otro OpenCV, que romperian
-# el venv del servidor (numpy 2.5 + torch + easyocr). Es OPCIONAL -- si falla la
-# instalacion o se apaga el servicio, el servidor sigue con EasyOCR solo.
-# Aporta: 10 lecturas correctas de 13 en el banco, frente a 9 sin el.
+# el venv del servidor (numpy 2.5 + torch + easyocr). Si falla la instalacion o
+# se apaga el servicio, el servidor sigue funcionando con EasyOCR de respaldo
+# (poner USAR_EASYOCR=1 en yolo-plates.service).
+# Es el motor de OCR PRINCIPAL: 10 lecturas correctas de 13 en el banco.
+# Usa los modelos moviles de PaddleOCR, que miden menos y aciertan mas.
 if [ "${CON_PADDLE:-1}" = "1" ]; then
-  echo "--- PaddleOCR (motor secundario) ---"
+  echo "--- PaddleOCR (motor principal de OCR) ---"
   [ -d /home/ubuntu/exp-venv ] || python3 -m venv /home/ubuntu/exp-venv
   /home/ubuntu/exp-venv/bin/pip install --upgrade pip -q
   /home/ubuntu/exp-venv/bin/pip install --no-cache-dir -q paddlepaddle paddleocr fastapi "uvicorn[standard]" \

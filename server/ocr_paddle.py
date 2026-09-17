@@ -44,19 +44,34 @@ app = FastAPI(title="OCR PaddleOCR (interno)", version="1.0.0")
 logger.info("Cargando PaddleOCR ...")
 # enable_mkldnn=False es obligatorio en esta instancia: con oneDNN activo la
 # inferencia revienta con "ConvertPirAttribute2RuntimeAttribute not support".
+# Modelos MOVILES, no los "medium" que PaddleOCR carga por defecto. Medido sobre
+# los 12 recortes del banco, los moviles no solo pesan menos: aciertan mas y son
+# mas rapidos.
+#
+#     medium  ->  8 correctas, 0 erroneas, 4 sin lectura, 14.2 s
+#     mobile  -> 10 correctas, 1 erronea,  1 sin lectura,  5.8 s
+#
+# Es contraintuitivo (el modelo "grande" deberia leer mejor), pero una placa es
+# texto corto, grande y de alto contraste: justo lo que los moviles hacen bien,
+# mientras el medium esta pensado para documentos densos.
+_DET = os.getenv("PADDLE_DET_MODEL", "PP-OCRv5_mobile_det")
+_REC = os.getenv("PADDLE_REC_MODEL", "PP-OCRv5_mobile_rec")
+
 _ocr = PaddleOCR(
     enable_mkldnn=False,
     use_doc_orientation_classify=False,  # el recorte ya viene derecho
     use_doc_unwarping=False,
     use_textline_orientation=False,
     lang=os.getenv("PADDLE_LANG", "en"),
+    text_detection_model_name=_DET,
+    text_recognition_model_name=_REC,
 )
 logger.info("PaddleOCR listo.")
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "motor": "paddleocr"}
+    return {"status": "ok", "motor": "paddleocr", "det": _DET, "rec": _REC}
 
 
 @app.post("/leer")

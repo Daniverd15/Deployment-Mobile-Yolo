@@ -11,6 +11,11 @@ Environment="MODEL_PATH=/home/ubuntu/proyecto/best.pt"
 Environment="WEB_DIR=/home/ubuntu/bike"
 Environment="YOLO_CONFIG_DIR=/home/ubuntu/proyecto/.ultralytics"
 Environment="OMP_NUM_THREADS=2"
+# Solo PaddleOCR (modelos moviles). Medido sobre pruebas/: 10 lecturas correctas
+# de 13 placas, y las dos configuraciones con EasyOCR quedan por debajo o no
+# caben en memoria. Ver docs/DESPLIEGUE_IPHONE.md para la comparativa.
+# Poner USAR_EASYOCR=1 reactiva EasyOCR como respaldo (necesita mas memoria).
+Environment="USAR_EASYOCR=0"
 ExecStart=/home/ubuntu/proyecto/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-keep-alive 75
 Restart=always
 RestartSec=5

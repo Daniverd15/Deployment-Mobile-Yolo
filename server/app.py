@@ -108,7 +108,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "2")
 app = FastAPI(
     title="Detector de Placas -- YOLOv8 + EasyOCR",
     description="API del proyecto de Ciencia de Datos (UNAB). Consumida desde Expo Go en iPhone.",
-    version="2.3.0",
+    version="3.0.0",
 )
 
 app.add_middleware(

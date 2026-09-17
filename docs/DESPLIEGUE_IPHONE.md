@@ -170,7 +170,7 @@ incluye motos y una escena de trafico con varios vehiculos):
 | `AEH01H_moto.jpg` | AEH01H | **AEH01H** | ok |
 | `JNU540_carroprueba.jpg` | JNU540 | **JNU540** | ok |
 
-**10 lecturas correctas de 13 placas visibles**, entre 2.6 y 5.3 s por foto.
+**10 lecturas correctas de 13 placas visibles**, entre 1.8 y 4.3 s por foto.
 
 Antes de los ajustes de deteccion eran 7, y con un solo motor de OCR 9. Las dos que se ganaron (`IJO387` y `FRL260`) ni
 siquiera se detectaban: aparecieron al subir `imgsz`. El denominador tambien cambio, porque la
@@ -253,27 +253,56 @@ pero medido con fotos de 4032 px sobre cuatro casos del banco, **duplicaba el ti
 una placa mas** (1280 -> 15.1 s y 5 correctas; 2560 -> 31.9 s y 5 correctas). Los recortes grandes
 hacen a EasyOCR mucho mas lento. Por eso `MAX_ORIGINAL` vale 1280.
 
-### PaddleOCR esta APAGADO por memoria
+### El motor de OCR: PaddleOCR con modelos MOVILES
 
-Los tres modelos juntos (YOLO ~150 MB + EasyOCR ~400 MB + PaddleOCR ~600 MB) no caben en los
-911 MB de la `t3.micro`. Con los tres cargados la instancia pagina sin parar -- se midieron
-**3.5 millones de paginas traidas de swap** -- y entonces una peticion que deberia tardar 4 s
-tardaba 30, la app mostraba *"Sin conexion"* con el servidor perfectamente vivo, y el mismo
-recorte de 274x108 px tardaba 11 s en un caso y 0.4 s en otro.
+PaddleOCR carga por defecto sus modelos `medium`. Probando los **moviles**, que existen para
+correr en telefonos, salio lo contrario de lo esperado: no solo pesan menos, **aciertan mas y son
+mas rapidos**. Medido sobre los 12 recortes del banco:
 
-Con PaddleOCR apagado: swap a 0, `/health` en 0.26 s y proceso en 1.6-4.2 s. El coste es **una
-placa**: `WUF62C` (la moto) vuelve a leerse `MUF282`, asi que el banco baja de 10 a 9 correctas.
+| Modelos de PaddleOCR | Correctas | Erroneas | Sin lectura | Tiempo |
+|---|---|---|---|---|
+| `PP-OCRv6_medium` (por defecto) | 8 | 0 | 4 | 14.2 s |
+| **`PP-OCRv5_mobile`** | **10** | 1 | 1 | **5.8 s** |
+
+Es contraintuitivo, pero tiene sentido: una placa es texto **corto, grande y de alto contraste**,
+justo lo que los modelos moviles hacen bien, mientras los `medium` estan pensados para documentos
+densos.
+
+Con eso, un solo motor iguala a la cascada de dos y **cabe en la memoria de la instancia**.
+Comparativa de las tres configuraciones posibles (13 placas visibles en el banco):
+
+| Configuracion | Correctas | Erroneas | Memoria | |
+|---|---|---|---|---|
+| EasyOCR solo | 9 | 3 | ~550 MB | cabe |
+| Cascada Paddle-medium + EasyOCR | 10 | 1 | ~1150 MB | **pagina sin parar** |
+| **Paddle-mobile solo** | **10** | **1** | **~700 MB** | **cabe** |
+
+Por eso el servicio corre con `USAR_EASYOCR=0`. EasyOCR sigue instalado como respaldo: cambiar esa
+variable a `1` en `yolo-plates.service` lo reactiva si algun dia hace falta.
+
+Lo que se gano con esto, en placas concretas que antes fallaban:
+
+- `SMV098` se leia `SKV098`, `SYV098` o `SHV098` segun la foto. **Ahora sale correcta.**
+- `WUF62C` se leia `MUF282` (el emblema del centro contado como un caracter). **Correcta.**
+- `COH262` se leyo `COH726` desde el telefono. **Correcta.**
+
+Por el camino real de la app (foto de 4032 px reducida a 2048 antes de subir): **8 de 8 lecturas
+correctas**, con 2 placas en la foto de los taxis y 3 en la de trafico, en 4.0-6.5 s.
+
+### Sobre la memoria
+
+Los tres modelos juntos (YOLO + EasyOCR + PaddleOCR `medium`) no caben en los 911 MB de la
+`t3.micro`. Con los tres cargados se midieron **3.5 millones de paginas traidas de swap**, y
+entonces una peticion que deberia tardar 4 s tardaba 30: la app mostraba *"Sin conexion"* con el
+servidor perfectamente vivo, sin un solo OOM ni reinicio. El mismo recorte de 274x108 px tardaba
+11 s en un caso y 0.4 s en otro, que es la firma de la paginacion y no del calculo.
+
+Con la configuracion actual `/health` responde en **0.03 s**.
 
 ```bash
-# volver a encenderlo (mas precision, riesgo de "Sin conexion")
-sudo systemctl enable --now ocr-paddle
-# apagarlo (estable y rapido)
-sudo systemctl disable --now ocr-paddle
+sudo systemctl status ocr-paddle     # motor de OCR
+sudo systemctl status yolo-plates    # API
 ```
-
-Para tener las dos cosas hace falta mas memoria: una `t3.small` (2 GB) sostiene los tres modelos
-sin swap. Al cambiar el tipo de instancia hay que pararla y **la IP publica cambia** salvo que se
-asocie una Elastic IP.
 
 ### Memoria y velocidad
 
